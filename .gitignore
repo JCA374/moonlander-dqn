@@ -1,6 +1,5 @@
 # Logs and temporary files
 *.log
-*.txt
 error_info_log.*
 
 # Old and archived files

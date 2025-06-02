@@ -1,0 +1,17 @@
+# MoonLander - Deep Reinforcement Learning Dependencies
+
+# Core ML and numerical computing
+numpy>=1.21.0
+tensorflow>=2.10.0
+
+# Environment and visualization  
+gymnasium>=0.29.0
+pygame>=2.1.0
+matplotlib>=3.5.0
+
+# System monitoring and utilities
+psutil>=5.9.0
+
+# Optional: Jupyter for experimentation (uncomment if needed)
+# jupyter>=1.0.0
+# ipykernel>=6.0.0
