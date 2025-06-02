@@ -1,0 +1,93 @@
+# Enabling AVX2/FMA Instructions for TensorFlow
+
+## Overview
+When running TensorFlow on CPU, you received this warning:
+```
+This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+```
+
+This message indicates that while your CPU supports AVX2 and FMA instructions (Advanced Vector Extensions 2 and Fused Multiply-Add), the pre-built TensorFlow package is not fully optimized to use these instructions in all operations.
+
+## Important NumPy Compatibility Issue
+The current error is related to NumPy 2.x incompatibility with TensorFlow. We need to downgrade NumPy to a 1.x version for compatibility. This must be fixed before attempting AVX2/FMA optimization.
+
+## What are AVX2 and FMA?
+- **AVX2**: Advanced Vector Extensions 2 - an instruction set for parallel computing that can perform multiple calculations simultaneously
+- **FMA**: Fused Multiply-Add - allows multiplication and addition in a single instruction with higher precision and performance
+
+These instructions can significantly accelerate machine learning operations by enabling more efficient vector math.
+
+## Options to Enable AVX2/FMA
+
+### Option 1: Install Optimized Build (Recommended)
+The simplest solution is to install a pre-built optimized wheel:
+
+```bash
+pip uninstall tensorflow
+pip install tensorflow-cpu==2.10.0 --force-reinstall
+```
+
+For users with NVIDIA GPUs, instead use:
+```bash
+pip uninstall tensorflow
+pip install tensorflow==2.10.0 --force-reinstall
+```
+
+### Option 2: Build from Source
+For maximum optimization, compile TensorFlow from source:
+
+1. Install build prerequisites:
+   ```bash
+   pip install -U pip numpy wheel packaging
+   pip install -U 'keras-preprocessing[image]'
+   ```
+
+2. Install Bazel (build tool) following instructions at bazel.build
+
+3. Clone TensorFlow repository:
+   ```bash
+   git clone https://github.com/tensorflow/tensorflow.git
+   cd tensorflow
+   git checkout r2.10  # Or appropriate version
+   ```
+
+4. Configure the build:
+   ```bash
+   ./configure
+   ```
+   - When prompted, specify CPU optimizations (AVX, AVX2, FMA)
+
+5. Build TensorFlow package:
+   ```bash
+   bazel build --config=opt --copt=-mavx --copt=-mavx2 --copt=-mfma //tensorflow/tools/pip_package:build_pip_package
+   ```
+
+6. Create wheel package:
+   ```bash
+   ./bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow_pkg
+   ```
+
+7. Install the package:
+   ```bash
+   pip install /tmp/tensorflow_pkg/tensorflow-version-cp39-*.whl
+   ```
+
+## Performance Expectations
+- 20-30% better performance in CPU-bound operations
+- Particularly helpful for dense matrix operations used in neural networks
+- Maximum benefit on compatible Intel CPUs (Core i7/i9) or AMD CPUs (Ryzen)
+
+## Alternative: Intel-Optimized TensorFlow
+For Intel CPUs, consider Intel's distribution of TensorFlow:
+
+```bash
+pip uninstall tensorflow
+pip install intel-tensorflow
+```
+
+## Important Notes
+1. The current TensorFlow is still functional without these optimizations
+2. The warning only indicates that not ALL operations use these instructions
+3. Critical operations are already optimized in the standard package
+4. Full optimization is most beneficial for large-scale CPU training
