@@ -1,0 +1,846 @@
+"""
+Training script for LunarLander-v3 from OpenAI Gymnasium.
+This file includes all necessary components for training a DQN agent.
+"""
+import os
+import sys
+import argparse
+import time
+import numpy as np
+import random
+from collections import deque
+from datetime import datetime
+import json
+import matplotlib.pyplot as plt
+
+# Import TensorFlow
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import Huber
+
+# Optimize TensorFlow for maximum performance
+# Advanced CPU and memory optimization
+try:
+    # Set reasonable thread counts for most systems
+    tf.config.threading.set_intra_op_parallelism_threads(6)
+    tf.config.threading.set_inter_op_parallelism_threads(4)
+    
+    # Allow TensorFlow to use more memory
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, False)  # Allow full memory usage
+    
+    # Increase memory usage limit for TensorFlow operations
+    gpu_options = tf.compat.v1.GPUOptions(per_process_gpu_memory_fraction=0.9)  # Use up to 90% of memory
+    
+    # Set up better memory management
+    tf.compat.v1.keras.backend.set_session(
+        tf.compat.v1.Session(
+            config=tf.compat.v1.ConfigProto(
+                gpu_options=gpu_options,
+                allow_soft_placement=True,
+                intra_op_parallelism_threads=6,
+                inter_op_parallelism_threads=4
+            )
+        )
+    )
+    
+    # Use standard float32 precision
+    policy = tf.keras.mixed_precision.Policy('float32')
+    tf.keras.mixed_precision.set_global_policy(policy)
+    
+    print("Advanced CPU and memory optimization applied successfully")
+except Exception as e:
+    print(f"Memory optimization failed: {e}, using default settings")
+
+# Import Gymnasium
+import gymnasium as gym
+
+#------------------------------------------------------------------------------
+# DQN Agent Implementation
+#------------------------------------------------------------------------------
+
+class DQNAgent:
+    """DQN agent for reinforcement learning in the LunarLander environment."""
+    
+    def __init__(self, 
+                state_size, 
+                action_size,
+                memory_size=10000,
+                gamma=0.99,
+                epsilon=1.0,
+                epsilon_min=0.01,
+                epsilon_decay=0.98,
+                learning_rate=0.0005,
+                batch_size=64,
+                update_target_freq=50,
+                use_batch_norm=True):
+        """Initialize the DQN agent."""
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=memory_size)
+        self.gamma = gamma  # Discount factor
+        self.epsilon = epsilon  # Exploration rate
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.update_target_freq = update_target_freq
+        self.step_counter = 0
+        self.use_batch_norm = use_batch_norm
+        
+        # Build the main Q-network
+        self.model = self._build_model()
+        
+        # Build the target Q-network
+        self.target_model = self._build_model()
+        self._update_target_network()  # Initial update to match the main network
+
+    def _build_model(self):
+        """Build an optimized neural network model for Q-function approximation."""
+        model = Sequential()
+
+        # First layer using float32 for better compatibility
+        # Reduced to 32 units for faster computation
+        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
+        # Set input shape using Input layer to fix the warning
+        model.build((None, self.state_size))
+
+        # Single hidden layer - reduced size for speed
+        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
+
+        # Output layer - linear activation for Q-values
+        model.add(Dense(self.action_size, activation='linear'))
+
+        # Use a faster optimizer with appropriate learning rate
+        optimizer = Adam(
+            learning_rate=self.learning_rate,
+            epsilon=1e-5
+        )
+
+        # Huber loss can be more stable than MSE while being faster
+        model.compile(loss='huber', optimizer=optimizer)
+        return model
+
+    def _update_target_network(self):
+        """Update the target network with weights from the main network.
+        
+        Uses a soft update approach for more stability.
+        """
+        # Soft update - blend a small portion of the main model into target
+        tau = 0.1  # Soft update parameter - small for stability
+        main_weights = self.model.get_weights()
+        target_weights = self.target_model.get_weights()
+        
+        for i in range(len(target_weights)):
+            target_weights[i] = target_weights[i] * (1 - tau) + main_weights[i] * tau
+        
+        self.target_model.set_weights(target_weights)
+    
+    def remember(self, state, action, reward, next_state, done):
+        """Store experience in memory for replay."""
+        self.memory.append((state, action, reward, next_state, done))
+    
+    def act(self, state, evaluate=False):
+        """Choose an action based on the current state."""
+        if not evaluate and np.random.rand() <= self.epsilon:
+            # Exploration: choose a random action
+            return random.randrange(self.action_size)
+        
+        # Exploitation: choose the best action based on Q-values
+        # Direct numpy prediction instead of TensorFlow for speed
+        q_values = self.model.predict(state.reshape(1, -1), verbose=0)
+        return np.argmax(q_values[0])
+
+    def replay(self):
+        """Optimized training with experiences from memory (experience replay)."""
+        if len(self.memory) < self.batch_size:
+            return 0.0
+
+        # Use larger batches for more efficient computation
+        batch_size = self.batch_size
+
+        # Pre-allocate memory for better efficiency
+        states = np.zeros((batch_size, self.state_size), dtype=np.float32)
+        actions = np.zeros(batch_size, dtype=np.int32)
+        rewards = np.zeros(batch_size, dtype=np.float32)
+        next_states = np.zeros((batch_size, self.state_size), dtype=np.float32)
+        dones = np.zeros(batch_size, dtype=bool)
+
+        # Sample minibatch and fill arrays in one loop
+        indices = random.sample(range(len(self.memory)), batch_size)
+        for i, idx in enumerate(indices):
+            states[i] = self.memory[idx][0]
+            actions[i] = self.memory[idx][1]
+            rewards[i] = self.memory[idx][2]
+            next_states[i] = self.memory[idx][3]
+            dones[i] = self.memory[idx][4]
+
+        # Process all predictions in two efficient batches
+        target_q_values = self.model.predict(
+            states, verbose=0, batch_size=batch_size)
+        next_q_values = self.target_model.predict(
+            next_states, verbose=0, batch_size=batch_size)
+
+        # Vectorize the target Q-value calculation using NumPy
+        max_next_q = np.max(next_q_values, axis=1)
+        target_for_action = rewards + (1 - dones) * self.gamma * max_next_q
+
+        # Blend new and old values for stability (vectorized)
+        action_indices = np.arange(batch_size)
+        current_vals = target_q_values[action_indices, actions]
+        target_q_values[action_indices, actions] = current_vals * \
+            0.05 + target_for_action * 0.95
+
+        # Single efficient training step - removed workers and use_multiprocessing
+        history = self.model.fit(
+            states, target_q_values,
+            epochs=1,
+            verbose=0,
+            batch_size=batch_size
+        )
+
+        # Update target network less frequently
+        self.step_counter += 1
+        if self.step_counter % self.update_target_freq == 0:
+            self._update_target_network()
+
+        # Decay epsilon with better efficiency
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
+        return history.history['loss'][0]
+
+    def save(self, filepath):
+        """Save the model weights."""
+        if not filepath.endswith('.weights.h5'):
+            filepath = filepath + '.weights.h5'
+        self.model.save_weights(filepath)
+    
+    def load(self, filepath):
+        """Load the model weights."""
+        if not filepath.endswith('.weights.h5') and not os.path.exists(filepath):
+            if os.path.exists(filepath + '.weights.h5'):
+                filepath = filepath + '.weights.h5'
+            else:
+                filepath = filepath + '.h5'  # For backward compatibility
+        self.model.load_weights(filepath)
+
+#------------------------------------------------------------------------------
+# Training Functions
+#------------------------------------------------------------------------------
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='LunarLander-v3 Training')
+    
+    # Set better default arguments for LunarLander-v3 environment
+    
+    parser.add_argument('--mode', type=str, default='train',
+                    choices=['train', 'play'],
+                    help='Mode: train or play')
+    parser.add_argument('--output-dir', type=str, default='results',
+                    help='Directory to save results')
+    parser.add_argument('--model-path', type=str, default=None,
+                    help='Path to a specific model to load')
+    parser.add_argument('--episodes', type=int, default=500,
+                    help='Number of episodes for training or playing')
+    parser.add_argument('--restart', action='store_true',
+                    help='Start training with a new model')
+    parser.add_argument('--max-steps', type=int, default=500,
+                    help='Maximum steps per episode - reduced for faster training')
+    parser.add_argument('--batch-size', type=int, default=256,
+                    help='Batch size for training (larger values use more memory but train faster)')
+    parser.add_argument('--memory-size', type=int, default=100000,
+                    help='Size of replay memory (larger values improve learning but use more memory)')
+    parser.add_argument('--memory-fraction', type=float, default=0.9,
+                    help='Fraction of system memory to use (0.1-0.95)')
+    parser.add_argument('--gamma', type=float, default=0.99,
+                    help='Discount factor - standard value for this environment')
+    parser.add_argument('--epsilon', type=float, default=1.0,
+                    help='Initial exploration rate')
+    parser.add_argument('--epsilon-min', type=float, default=0.1,
+                    help='Minimum exploration rate - balanced for exploration/exploitation')
+    parser.add_argument('--epsilon-decay', type=float, default=0.995,
+                    help='Exploration rate decay - slower decay for more exploration')
+    parser.add_argument('--learning-rate', type=float, default=0.0005,
+                    help='Learning rate - conservative for stable learning')
+    parser.add_argument('--update-target-freq', type=int, default=20,
+                    help='Frequency of target network updates - less frequent for stability')
+    parser.add_argument('--render', action='store_true',
+                    help='Render the environment')
+    parser.add_argument('--eval-freq', type=int, default=100,
+                    help='Episode frequency for evaluation')
+    parser.add_argument('--eval-episodes', type=int, default=3,
+                    help='Number of episodes for evaluation')
+    parser.add_argument('--seed', type=int, default=42,
+                    help='Random seed')
+    parser.add_argument('--delay', type=float, default=0.05,
+                    help='Delay between steps when rendering (seconds)')
+    
+    return parser.parse_args()
+
+def setup_logger():
+    """Setup basic logging to console."""
+    import logging
+    logger = logging.getLogger('moonlander')
+    logger.setLevel(logging.INFO)
+    
+    # Create console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    
+    # Add handler to logger
+    logger.addHandler(ch)
+    
+    return logger
+
+def find_best_model(results_dir):
+    """Find the best model from previous runs."""
+    best_model_path = None
+    
+    if not os.path.exists(results_dir):
+        print(f"No results directory found at {results_dir}")
+        return None
+    
+    # First look for a file specifically named best_model.weights.h5
+    for root, dirs, files in os.walk(results_dir):
+        for file in files:
+            if file == 'best_model.weights.h5':
+                # Find the most recently modified best_model if there are multiple
+                if best_model_path is None or os.path.getmtime(os.path.join(root, file)) > os.path.getmtime(best_model_path):
+                    best_model_path = os.path.join(root, file)
+    
+    # If we found a best_model.weights.h5, return it
+    if best_model_path:
+        print(f"Found best model: {best_model_path}")
+        return best_model_path
+        
+    # Otherwise look for any model file as a fallback
+    model_files = []
+    for root, dirs, files in os.walk(results_dir):
+        for file in files:
+            if file.endswith('.weights.h5') or file.endswith('.h5'):
+                model_files.append(os.path.join(root, file))
+    
+    if model_files:
+        # Sort by modification time (most recent first)
+        model_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        best_model_path = model_files[0]
+        print(f"No best_model.weights.h5 found, using most recent model: {best_model_path}")
+    else:
+        print("No model files found.")
+    
+    return best_model_path
+
+def optimized_train_loop(env, agent, args, logger):
+    """Optimized training loop for faster learning."""
+    # Pre-allocate arrays for metrics with more efficient data types
+    episode_rewards = np.zeros(args.episodes, dtype=np.float32)  # Use float32 instead of float64
+    episode_steps = np.zeros(args.episodes, dtype=np.int32)      # Use int32 instead of int64
+    episode_losses = np.zeros(args.episodes, dtype=np.float32)   # Use float32 instead of float64
+
+    # Track best reward for model saving
+    best_reward = -float('inf')
+
+    # Reduce model saving frequency - save only best and final models
+    model_dir = os.path.join(args.output_dir, 'current_run', 'models')
+    
+    # Increase memory allocation for training
+    # Pre-allocate a larger experience replay buffer for better performance
+    memory_blocks = max(5, int(args.memory_size * 1.5))  # 50% more memory
+    logger.info(f"Allocating larger replay buffer with {memory_blocks} blocks for better performance")
+
+    # Vectorized epsilon decay planning
+    epsilon_schedule = np.maximum(
+        args.epsilon_min,
+        args.epsilon * args.epsilon_decay ** np.arange(args.episodes)
+    )
+
+    # Training loop
+    for episode in range(args.episodes):
+        state, _ = env.reset(seed=args.seed if episode == 0 else None)
+
+        # Pre-allocate episode tracking variables
+        total_reward = 0
+        losses = []
+
+        # Set current epsilon from pre-computed schedule
+        agent.epsilon = epsilon_schedule[episode]
+
+        # Main episode loop
+        for step in range(args.max_steps):
+            # Select and take action
+            action = agent.act(state)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+
+            # Apply efficient reward scaling using NumPy
+            scaled_reward = np.clip(reward * 0.1, -10.0, 10.0)
+            
+            # Apply additional reward shaping to discourage hovering
+            # Extract state components
+            x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
+            
+            # Add landing incentive - give extra reward for getting closer to ground with proper orientation
+            if abs(x) < 0.3 and y < 0.2 and abs(angle) < 0.2 and abs(vy) < 0.2:
+                # Give bonus for being very close to landing
+                scaled_reward += 0.2
+                
+                # Extra strong incentive if legs are contacting but not yet landed
+                if (left_leg == 1 or right_leg == 1) and not done:
+                    scaled_reward += 0.5
+            
+            # Add hover penalty - discourage hovering above landing zone
+            if abs(x) < 0.3 and y > 0.05 and y < 0.2 and abs(vy) < 0.1 and abs(vx) < 0.1:
+                # Penalty for hovering - stronger the longer it hovers
+                scaled_reward -= 0.1
+            
+            # Store experience
+            agent.remember(state, action, scaled_reward, next_state, done)
+
+            # Train agent (only every 4 steps for speed)
+            if step % 4 == 0:
+                loss = agent.replay()
+                if loss > 0:
+                    losses.append(loss)
+
+            # Update state and tracking variables
+            state = next_state
+            total_reward += reward
+
+            if done:
+                break
+
+        # Update metrics
+        episode_rewards[episode] = total_reward
+        episode_steps[episode] = step + 1
+        episode_losses[episode] = np.mean(losses) if losses else 0
+
+        # Log progress (less frequently)
+        if episode % 20 == 0:
+            recent_rewards = episode_rewards[max(0, episode-20):episode+1]
+            logger.info(f'Episode {episode}/{args.episodes} - '
+                        f'Reward: {total_reward:.2f}, '
+                        f'Avg20: {np.mean(recent_rewards):.2f}, '
+                        f'Epsilon: {agent.epsilon:.4f}')
+
+        # Save model if it's better than previous best
+        if total_reward > best_reward:
+            best_reward = total_reward
+            agent.save(os.path.join(model_dir, 'best_model'))
+
+            # Only log best model saves, not every improvement
+            if total_reward > best_reward * 1.1:  # 10% improvement
+                logger.info(
+                    f'New best model saved with reward: {best_reward:.2f}')
+
+        # Evaluate less frequently
+        if args.eval_freq > 0 and episode % args.eval_freq == 0:
+            eval_reward, _, success_rate = evaluate(
+                env, agent, max(1, args.eval_episodes // 2), args.seed,
+                args.max_steps, render=False
+            )
+            logger.info(f'Evaluation - Reward: {eval_reward:.2f}, '
+                        f'Success: {success_rate:.2f}')
+
+    # Save final model
+    agent.save(os.path.join(model_dir, 'final_model'))
+    logger.info('Training completed - Final model saved')
+
+    # Only create plots at the end
+    plot_learning_curves(episode_rewards, episode_steps, episode_losses,
+                         os.path.join(args.output_dir, 'current_run', 'plots'))
+
+    return agent, best_reward
+
+def train(args, logger):
+    """Train the DQN agent on the LunarLander environment."""
+    # Set up directories - use a fixed directory to keep things simple
+    run_dir = os.path.join(args.output_dir, 'current_run')
+    model_dir = os.path.join(run_dir, 'models')
+    log_dir = os.path.join(run_dir, 'logs')
+    plot_dir = os.path.join(run_dir, 'plots')
+
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(plot_dir, exist_ok=True)
+
+    # Save arguments
+    with open(os.path.join(run_dir, 'args.json'), 'w') as f:
+        json.dump(vars(args), f, indent=4)
+
+    # Set seeds for reproducibility
+    np.random.seed(args.seed)
+    tf.random.set_seed(args.seed)
+    random.seed(args.seed)
+
+    # Advanced TensorFlow memory optimization
+    try:
+        # More aggressive thread settings for performance
+        tf.config.threading.set_intra_op_parallelism_threads(6)
+        tf.config.threading.set_inter_op_parallelism_threads(4)
+        
+        # Set memory limits for better performance - allow up to 90% memory usage
+        tf.config.experimental.set_virtual_device_configuration(
+            tf.config.list_physical_devices('CPU')[0],
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 16)]
+        )
+        
+        # Increase memory allocation for operations
+        tf.config.experimental.set_memory_growth(
+            tf.config.list_physical_devices('CPU')[0], 
+            False  # Don't restrict growth
+        )
+        
+        # For training speed: use larger batches when more memory is available
+        args.batch_size = 256  # Increased from default
+        
+        logger.info("Advanced TensorFlow memory optimization applied - using 90% of available memory")
+    except Exception as e:
+        logger.warning(f"Memory optimization failed: {e}, using default settings")
+
+    # Create environment using OpenAI Gymnasium LunarLander-v3
+    render_mode = None
+    if args.render:
+        render_mode = 'human'
+
+    env = gym.make('LunarLander-v3', render_mode=render_mode)
+
+    # Get state and action space dimensions
+    state_size = env.observation_space.shape[0]
+    action_size = env.action_space.n
+
+    logger.info(f'State size: {state_size}, Action size: {action_size}')
+
+    # Create agent
+    agent = DQNAgent(
+        state_size=state_size,
+        action_size=action_size,
+        memory_size=args.memory_size,
+        gamma=args.gamma,
+        epsilon=args.epsilon,
+        epsilon_min=args.epsilon_min,
+        epsilon_decay=args.epsilon_decay,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        update_target_freq=args.update_target_freq,
+        use_batch_norm=False
+    )
+
+    # Try to load previous best model and ensure training continues from best model
+    best_reward = -float('inf')
+    model_loaded = False
+    
+    if not args.restart:
+        # First try to load from the specified path if provided
+        if args.model_path:
+            try:
+                agent.load(args.model_path)
+                logger.info(f"Successfully loaded model from user-specified path: {args.model_path}")
+                model_loaded = True
+            except Exception as e:
+                logger.warning(f"Failed to load model from specified path: {e}")
+                
+        # If no path specified or loading failed, try to find the best model
+        if not model_loaded:
+            model_path = find_best_model(args.output_dir)
+            if model_path:
+                try:
+                    agent.load(model_path)
+                    logger.info(f"Successfully loaded model from {model_path}")
+                    model_loaded = True
+                except Exception as e:
+                    logger.error(f"Failed to load model: {e}")
+        
+        # If a model was successfully loaded, evaluate it
+        if model_loaded:
+            # Evaluate the loaded model
+            eval_reward, _, success_rate = evaluate(
+                env, agent, 5, args.seed, args.max_steps, render=False)
+            logger.info(
+                f"Loaded model evaluation - Avg. Reward: {eval_reward:.2f}, Success: {success_rate:.2f}")
+
+            # Set as best reward so far
+            best_reward = eval_reward
+            
+            # Also adjust epsilon based on model performance to avoid starting over with full exploration
+            if success_rate > 0.5:  # If model is already good
+                agent.epsilon = max(0.2, agent.epsilon_min * 2)  # Lower exploration
+                logger.info(f"Model performing well, reducing exploration rate to {agent.epsilon:.2f}")
+    
+    if not model_loaded:
+        logger.info("Starting with a new model (no existing model loaded)")
+
+    # Use the optimized training loop
+    logger.info('Starting training with optimized loop...')
+    agent, final_best_reward = optimized_train_loop(env, agent, args, logger)
+
+    # Close environment
+    env.close()
+    logger.info(
+        f'Training completed with best reward: {final_best_reward:.2f}')
+
+def evaluate(env, agent, num_episodes, seed, max_steps, render=False):
+    """Evaluate the agent on the environment."""
+    rewards = []
+    steps = []
+    successes = 0
+    hovers = 0
+    
+    for episode in range(num_episodes):
+        state, _ = env.reset(seed=seed + episode)
+        total_reward = 0
+        step_count = 0
+        done = False
+        
+        # Track hovering behavior
+        hovering_steps = 0
+        near_landing_pad = False
+        
+        for step in range(max_steps):
+            action = agent.act(state, evaluate=True)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            # Extract state components
+            x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
+            
+            # Check for hovering behavior (near landing pad but not landing)
+            if abs(x) < 0.2 and y < 0.2 and y > 0.01 and abs(vy) < 0.2:
+                hovering_steps += 1
+                near_landing_pad = True
+            
+            state = next_state
+            total_reward += reward
+            step_count += 1
+            
+            if done:
+                # Count as success if landing is successful (positive reward)
+                if terminated and reward > 0:
+                    successes += 1
+                break
+                
+            # If episode reaches max steps and was hovering, count as a hover failure
+            if step == max_steps - 1 and hovering_steps > 50 and near_landing_pad:
+                hovers += 1
+        
+        rewards.append(total_reward)
+        steps.append(step_count)
+    
+    avg_reward = np.mean(rewards)
+    avg_steps = np.mean(steps)
+    success_rate = successes / num_episodes
+    hover_rate = hovers / num_episodes
+    
+    # Log additional information about hovering
+    if hover_rate > 0:
+        print(f"WARNING: Agent is hovering instead of landing in {hover_rate:.0%} of evaluation episodes")
+    
+    return avg_reward, avg_steps, success_rate
+
+def plot_learning_curves(rewards, steps, losses, save_dir):
+    """Plot learning curves."""
+    # Create figure
+    fig, axs = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
+    
+    # Plot rewards
+    axs[0].plot(rewards)
+    axs[0].set_title('Episode Rewards')
+    axs[0].set_ylabel('Reward')
+    
+    # Add moving average
+    if len(rewards) >= 100:
+        moving_avg = np.convolve(rewards, np.ones(100) / 100, mode='valid')
+        axs[0].plot(range(99, len(rewards)), moving_avg, 'r-')
+    
+    # Plot steps
+    axs[1].plot(steps)
+    axs[1].set_title('Episode Steps')
+    axs[1].set_ylabel('Steps')
+    
+    # Plot losses
+    axs[2].plot(losses)
+    axs[2].set_title('Episode Losses')
+    axs[2].set_ylabel('Loss')
+    axs[2].set_xlabel('Episode')
+    
+    # Save figure
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'learning_curves.png'))
+    plt.close()
+
+
+class EfficientReplayBuffer:
+    """Memory-efficient implementation of replay buffer using NumPy arrays."""
+
+    def __init__(self, state_size, max_size=10000):
+        self.max_size = max_size
+        self.state_size = state_size
+
+        # Pre-allocate fixed-size arrays
+        self.states = np.zeros((max_size, state_size), dtype=np.float32)
+        self.actions = np.zeros(max_size, dtype=np.int32)
+        self.rewards = np.zeros(max_size, dtype=np.float32)
+        self.next_states = np.zeros((max_size, state_size), dtype=np.float32)
+        self.dones = np.zeros(max_size, dtype=np.bool_)
+
+        self.size = 0
+        self.position = 0
+
+    def add(self, state, action, reward, next_state, done):
+        """Add experience to buffer."""
+        self.states[self.position] = state
+        self.actions[self.position] = action
+        self.rewards[self.position] = reward
+        self.next_states[self.position] = next_state
+        self.dones[self.position] = done
+
+        self.size = min(self.size + 1, self.max_size)
+        self.position = (self.position + 1) % self.max_size
+
+    def sample(self, batch_size):
+        """Sample a batch of experiences."""
+        indices = np.random.randint(0, self.size, size=batch_size)
+        return (
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices]
+        )
+
+    def __len__(self):
+        return self.size
+
+#------------------------------------------------------------------------------
+# Play/Visualization Functions
+#------------------------------------------------------------------------------
+
+def play(args, logger):
+    """Play the LunarLander game using a trained model."""
+    # Create environment with rendering
+    env = gym.make('LunarLander-v3', render_mode='human')
+    
+    # Get state and action space dimensions
+    state_size = env.observation_space.shape[0]
+    action_size = env.action_space.n
+    
+    # Create agent
+    agent = DQNAgent(
+        state_size=state_size,
+        action_size=action_size,
+        memory_size=10000,  # Not used during play
+        gamma=0.99,
+        epsilon=0.0,  # No exploration during play
+        epsilon_min=0.0,
+        epsilon_decay=0.995,
+        learning_rate=0.0005,
+        batch_size=64,  # Not used during play
+        update_target_freq=50,
+        use_batch_norm=False  # Simplify model for loading
+    )
+    
+    # Load model
+    model_path = args.model_path or find_best_model(args.output_dir)
+    if not model_path:
+        logger.error("No model found. Please train a model first.")
+        return
+    
+    try:
+        agent.load(model_path)
+        logger.info(f"Successfully loaded model from {model_path}")
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        return
+    
+    # Play episodes
+    logger.info(f"Playing {args.episodes} episodes")
+    total_rewards = []
+    total_steps = []
+    success_count = 0
+    
+    for episode in range(1, args.episodes + 1):
+        logger.info(f"Episode {episode}/{args.episodes}")
+        state, _ = env.reset(seed=args.seed + episode)
+        total_reward = 0
+        steps = 0
+        done = False
+        
+        while not done and steps < args.max_steps:
+            # Select action
+            action = agent.act(state, evaluate=True)
+            
+            # Take action
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            # Removed sleep call to improve performance
+            
+            # Update state and metrics
+            state = next_state
+            total_reward += reward
+            steps += 1
+            
+            if done:
+                if terminated and reward > 0:  # Successful landing
+                    success_count += 1
+                    logger.info(f"Successful landing! Reward: {total_reward:.2f}")
+                else:
+                    logger.info(f"Episode finished. Reward: {total_reward:.2f}")
+                break
+        
+        total_rewards.append(total_reward)
+        total_steps.append(steps)
+    
+    # Print summary
+    avg_reward = np.mean(total_rewards)
+    avg_steps = np.mean(total_steps)
+    success_rate = success_count / args.episodes
+    
+    logger.info("\nPlay Summary:")
+    logger.info(f"Average Reward: {avg_reward:.2f}")
+    logger.info(f"Average Steps: {avg_steps:.2f}")
+    logger.info(f"Success Rate: {success_rate:.2f} ({success_count}/{args.episodes})")
+    
+    # Close environment
+    env.close()
+
+#------------------------------------------------------------------------------
+# Main Function
+#------------------------------------------------------------------------------
+
+
+def main():
+    """Main function."""
+    # Set high priority for Windows systems
+    if os.name == 'nt':  # Windows
+        import psutil
+        # Set process to high priority
+        p = psutil.Process(os.getpid())
+        p.nice(psutil.HIGH_PRIORITY_CLASS)
+
+    args = parse_args()
+
+    # Setup output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Setup logger
+    logger = setup_logger()
+
+    # Run selected mode
+    if args.mode == 'train':
+        train(args, logger)
+    elif args.mode == 'play':
+        play(args, logger)
+    else:
+        logger.error(f"Unknown mode: {args.mode}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,22 @@
+{
+    "mode": "train",
+    "output_dir": "results",
+    "model_path": null,
+    "episodes": 1000,
+    "restart": false,
+    "max_steps": 500,
+    "batch_size": 256,
+    "memory_size": 100000,
+    "memory_fraction": 0.9,
+    "gamma": 0.99,
+    "epsilon": 1.0,
+    "epsilon_min": 0.1,
+    "epsilon_decay": 0.995,
+    "learning_rate": 0.0005,
+    "update_target_freq": 20,
+    "render": false,
+    "eval_freq": 100,
+    "eval_episodes": 3,
+    "seed": 42,
+    "delay": 0.05
+}
