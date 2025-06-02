@@ -5,6 +5,7 @@ error_info_log.*
 # Old and archived files
 old/
 results/run_*/
+results_backup/
 
 # Python cache and temporary files
 __pycache__/

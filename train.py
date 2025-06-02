@@ -8,7 +8,6 @@ import argparse
 import time
 import numpy as np
 import random
-from collections import deque
 from datetime import datetime
 import json
 import matplotlib.pyplot as plt
@@ -20,38 +19,21 @@ from tensorflow.keras.layers import Dense, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber
 
-# Optimize TensorFlow for maximum performance
-# Advanced CPU and memory optimization
+# Optimize TensorFlow for Intel i7-8565U CPU
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce logging
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'  # Enable oneDNN optimizations for Intel CPU
+
 try:
-    # Set reasonable thread counts for most systems
-    tf.config.threading.set_intra_op_parallelism_threads(6)
-    tf.config.threading.set_inter_op_parallelism_threads(4)
-    
-    # Allow TensorFlow to use more memory
-    gpus = tf.config.experimental.list_physical_devices('GPU')
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, False)  # Allow full memory usage
-    
-    # Increase memory usage limit for TensorFlow operations
-    gpu_options = tf.compat.v1.GPUOptions(per_process_gpu_memory_fraction=0.9)  # Use up to 90% of memory
-    
-    # Set up better memory management
-    tf.compat.v1.keras.backend.set_session(
-        tf.compat.v1.Session(
-            config=tf.compat.v1.ConfigProto(
-                gpu_options=gpu_options,
-                allow_soft_placement=True,
-                intra_op_parallelism_threads=6,
-                inter_op_parallelism_threads=4
-            )
-        )
-    )
+    # Optimize for i7-8565U (4 cores, 8 threads)
+    tf.config.threading.set_intra_op_parallelism_threads(4)
+    tf.config.threading.set_inter_op_parallelism_threads(2)
     
     # Use standard float32 precision
     policy = tf.keras.mixed_precision.Policy('float32')
     tf.keras.mixed_precision.set_global_policy(policy)
     
-    print("Advanced CPU and memory optimization applied successfully")
+    print("CPU optimization for Intel i7-8565U applied successfully")
 except Exception as e:
     print(f"Memory optimization failed: {e}, using default settings")
 
@@ -59,6 +41,49 @@ except Exception as e:
 import gymnasium as gym
 
 #------------------------------------------------------------------------------
+# Efficient Replay Buffer Implementation
+#------------------------------------------------------------------------------
+
+class EfficientReplayBuffer:
+    """Efficient NumPy-based replay buffer for better performance."""
+    
+    def __init__(self, state_size, max_size):
+        self.max_size = max_size
+        self.ptr = 0
+        self.size = 0
+        
+        # Pre-allocate arrays for efficiency
+        self.states = np.zeros((max_size, state_size), dtype=np.float32)
+        self.actions = np.zeros(max_size, dtype=np.int32)
+        self.rewards = np.zeros(max_size, dtype=np.float32)
+        self.next_states = np.zeros((max_size, state_size), dtype=np.float32)
+        self.dones = np.zeros(max_size, dtype=bool)
+    
+    def add(self, state, action, reward, next_state, done):
+        """Add experience to buffer."""
+        self.states[self.ptr] = state
+        self.actions[self.ptr] = action
+        self.rewards[self.ptr] = reward
+        self.next_states[self.ptr] = next_state
+        self.dones[self.ptr] = done
+        
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+    
+    def sample(self, batch_size):
+        """Sample a batch of experiences."""
+        indices = np.random.choice(self.size, batch_size, replace=False)
+        return (
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices]
+        )
+    
+    def __len__(self):
+        return self.size
+
 # DQN Agent Implementation
 #------------------------------------------------------------------------------
 
@@ -80,7 +105,7 @@ class DQNAgent:
         """Initialize the DQN agent."""
         self.state_size = state_size
         self.action_size = action_size
-        self.memory = deque(maxlen=memory_size)
+        self.memory = EfficientReplayBuffer(state_size, memory_size)
         self.gamma = gamma  # Discount factor
         self.epsilon = epsilon  # Exploration rate
         self.epsilon_min = epsilon_min
@@ -99,49 +124,40 @@ class DQNAgent:
         self._update_target_network()  # Initial update to match the main network
 
     def _build_model(self):
-        """Build an optimized neural network model for Q-function approximation."""
+        """Build enhanced neural network for better learning."""
         model = Sequential()
-
-        # First layer using float32 for better compatibility
-        # Reduced to 32 units for faster computation
-        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
-        # Set input shape using Input layer to fix the warning
-        model.build((None, self.state_size))
-
-        # Single hidden layer - reduced size for speed
-        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
-
-        # Output layer - linear activation for Q-values
+        
+        # Input layer with proper initialization
+        model.add(Dense(128, input_shape=(self.state_size,), 
+                        activation='relu', 
+                        kernel_initializer='he_uniform'))
+        
+        # Hidden layers with dropout for regularization
+        model.add(Dense(128, activation='relu', kernel_initializer='he_uniform'))
+        model.add(tf.keras.layers.Dropout(0.1))
+        
+        model.add(Dense(64, activation='relu', kernel_initializer='he_uniform'))
+        
+        # Output layer
         model.add(Dense(self.action_size, activation='linear'))
-
-        # Use a faster optimizer with appropriate learning rate
-        optimizer = Adam(
-            learning_rate=self.learning_rate,
-            epsilon=1e-5
-        )
-
-        # Huber loss can be more stable than MSE while being faster
-        model.compile(loss='huber', optimizer=optimizer)
+        
+        # Compile with better optimizer settings
+        optimizer = Adam(learning_rate=0.001, clipnorm=1.0)
+        model.compile(loss='mse', optimizer=optimizer)
+        
         return model
 
     def _update_target_network(self):
         """Update the target network with weights from the main network.
         
-        Uses a soft update approach for more stability.
+        Uses hard update for better stability in DQN.
         """
-        # Soft update - blend a small portion of the main model into target
-        tau = 0.1  # Soft update parameter - small for stability
-        main_weights = self.model.get_weights()
-        target_weights = self.target_model.get_weights()
-        
-        for i in range(len(target_weights)):
-            target_weights[i] = target_weights[i] * (1 - tau) + main_weights[i] * tau
-        
-        self.target_model.set_weights(target_weights)
+        # Hard update - copy weights completely from main to target network
+        self.target_model.set_weights(self.model.get_weights())
     
     def remember(self, state, action, reward, next_state, done):
         """Store experience in memory for replay."""
-        self.memory.append((state, action, reward, next_state, done))
+        self.memory.add(state, action, reward, next_state, done)
     
     def act(self, state, evaluate=False):
         """Choose an action based on the current state."""
@@ -162,21 +178,8 @@ class DQNAgent:
         # Use larger batches for more efficient computation
         batch_size = self.batch_size
 
-        # Pre-allocate memory for better efficiency
-        states = np.zeros((batch_size, self.state_size), dtype=np.float32)
-        actions = np.zeros(batch_size, dtype=np.int32)
-        rewards = np.zeros(batch_size, dtype=np.float32)
-        next_states = np.zeros((batch_size, self.state_size), dtype=np.float32)
-        dones = np.zeros(batch_size, dtype=bool)
-
-        # Sample minibatch and fill arrays in one loop
-        indices = random.sample(range(len(self.memory)), batch_size)
-        for i, idx in enumerate(indices):
-            states[i] = self.memory[idx][0]
-            actions[i] = self.memory[idx][1]
-            rewards[i] = self.memory[idx][2]
-            next_states[i] = self.memory[idx][3]
-            dones[i] = self.memory[idx][4]
+        # Sample minibatch using EfficientReplayBuffer
+        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
 
         # Process all predictions in two efficient batches
         target_q_values = self.model.predict(
@@ -188,11 +191,9 @@ class DQNAgent:
         max_next_q = np.max(next_q_values, axis=1)
         target_for_action = rewards + (1 - dones) * self.gamma * max_next_q
 
-        # Blend new and old values for stability (vectorized)
+        # Use standard Q-learning update (vectorized)
         action_indices = np.arange(batch_size)
-        current_vals = target_q_values[action_indices, actions]
-        target_q_values[action_indices, actions] = current_vals * \
-            0.05 + target_for_action * 0.95
+        target_q_values[action_indices, actions] = target_for_action
 
         # Single efficient training step - removed workers and use_multiprocessing
         history = self.model.fit(
@@ -249,12 +250,12 @@ def parse_args():
                     help='Number of episodes for training or playing')
     parser.add_argument('--restart', action='store_true',
                     help='Start training with a new model')
-    parser.add_argument('--max-steps', type=int, default=500,
-                    help='Maximum steps per episode - reduced for faster training')
-    parser.add_argument('--batch-size', type=int, default=256,
-                    help='Batch size for training (larger values use more memory but train faster)')
-    parser.add_argument('--memory-size', type=int, default=100000,
-                    help='Size of replay memory (larger values improve learning but use more memory)')
+    parser.add_argument('--max-steps', type=int, default=1000,
+                    help='Maximum steps per episode (increased for better landing attempts)')
+    parser.add_argument('--batch-size', type=int, default=64,
+                    help='Batch size for training (optimized for i7-8565U CPU)')
+    parser.add_argument('--memory-size', type=int, default=50000,
+                    help='Size of replay memory (optimized for CPU performance)')
     parser.add_argument('--memory-fraction', type=float, default=0.9,
                     help='Fraction of system memory to use (0.1-0.95)')
     parser.add_argument('--gamma', type=float, default=0.99,
@@ -263,12 +264,12 @@ def parse_args():
                     help='Initial exploration rate')
     parser.add_argument('--epsilon-min', type=float, default=0.1,
                     help='Minimum exploration rate - balanced for exploration/exploitation')
-    parser.add_argument('--epsilon-decay', type=float, default=0.995,
-                    help='Exploration rate decay - slower decay for more exploration')
+    parser.add_argument('--epsilon-decay', type=float, default=0.997,
+                    help='Exploration rate decay (optimized for better exploration)')
     parser.add_argument('--learning-rate', type=float, default=0.0005,
                     help='Learning rate - conservative for stable learning')
-    parser.add_argument('--update-target-freq', type=int, default=20,
-                    help='Frequency of target network updates - less frequent for stability')
+    parser.add_argument('--update-target-freq', type=int, default=100,
+                    help='Frequency of target network updates (increased for stability)')
     parser.add_argument('--render', action='store_true',
                     help='Render the environment')
     parser.add_argument('--eval-freq', type=int, default=100,
@@ -381,8 +382,14 @@ def optimized_train_loop(env, agent, args, logger):
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
-            # Apply efficient reward scaling using NumPy
-            scaled_reward = np.clip(reward * 0.1, -10.0, 10.0)
+            # Apply proper reward scaling for LunarLander
+            # LunarLander rewards range from -100 to +140
+            if reward > 100:  # Successful landing
+                scaled_reward = reward  # Keep full reward
+            elif reward < -100:  # Crash
+                scaled_reward = reward  # Keep full penalty
+            else:
+                scaled_reward = reward * 0.5  # Moderate scaling for other rewards
             
             # Apply additional reward shaping to discourage hovering
             # Extract state components
