@@ -283,6 +283,21 @@ def parse_args():
     
     return parser.parse_args()
 
+def diagnose_hovering(state, step_count, hover_threshold=50):
+    """Detect if agent is hovering instead of landing."""
+    x, y, vx, vy, angle, angular_vel, left_leg, right_leg = state
+    
+    # Check hovering conditions
+    is_hovering = (
+        abs(x) < 0.3 and  # Near landing zone
+        0.05 < y < 0.2 and  # Low but not landed
+        abs(vy) < 0.1 and  # Low vertical velocity
+        abs(vx) < 0.1 and  # Low horizontal velocity
+        step_count > hover_threshold  # Been doing this for a while
+    )
+    
+    return is_hovering
+
 def setup_logger():
     """Setup basic logging to console."""
     import logging
@@ -404,10 +419,15 @@ def optimized_train_loop(env, agent, args, logger):
                 if (left_leg == 1 or right_leg == 1) and not done:
                     scaled_reward += 0.5
             
-            # Add hover penalty - discourage hovering above landing zone
+            # Add stronger hover penalty - discourage hovering above landing zone
             if abs(x) < 0.3 and y > 0.05 and y < 0.2 and abs(vy) < 0.1 and abs(vx) < 0.1:
-                # Penalty for hovering - stronger the longer it hovers
-                scaled_reward -= 0.1
+                # Progressive penalty - gets worse the longer it hovers
+                hover_penalty = -0.3 * (1 + step / 100)  # Increases over time
+                scaled_reward += hover_penalty
+                
+            # Add strong incentive to commit to landing when very close
+            if y < 0.1 and abs(vy) < 0.3:
+                scaled_reward += 2.0  # Strong bonus for final approach
             
             # Store experience
             agent.remember(state, action, scaled_reward, next_state, done)
@@ -421,6 +441,11 @@ def optimized_train_loop(env, agent, args, logger):
             # Update state and tracking variables
             state = next_state
             total_reward += reward
+            
+            # Track hovering behavior
+            if step % 50 == 0:
+                if diagnose_hovering(next_state, step):
+                    logger.warning(f"Episode {episode}: Hovering detected at step {step}")
 
             if done:
                 break
@@ -495,19 +520,19 @@ def train(args, logger):
         tf.config.threading.set_inter_op_parallelism_threads(4)
         
         # Set memory limits for better performance - allow up to 90% memory usage
-        tf.config.experimental.set_virtual_device_configuration(
-            tf.config.list_physical_devices('CPU')[0],
-            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 16)]
-        )
+        # tf.config.experimental.set_virtual_device_configuration(
+        #     tf.config.list_physical_devices('CPU')[0],
+        #     [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 16)]
+        # )
         
         # Increase memory allocation for operations
-        tf.config.experimental.set_memory_growth(
-            tf.config.list_physical_devices('CPU')[0], 
-            False  # Don't restrict growth
-        )
+        # tf.config.experimental.set_memory_growth(
+        #     tf.config.list_physical_devices('CPU')[0], 
+        #     False  # Don't restrict growth
+        # )
         
         # For training speed: use larger batches when more memory is available
-        args.batch_size = 256  # Increased from default
+        # args.batch_size = 256  # Removed - respects command line argument
         
         logger.info("Advanced TensorFlow memory optimization applied - using 90% of available memory")
     except Exception as e:
@@ -684,47 +709,6 @@ def plot_learning_curves(rewards, steps, losses, save_dir):
     plt.close()
 
 
-class EfficientReplayBuffer:
-    """Memory-efficient implementation of replay buffer using NumPy arrays."""
-
-    def __init__(self, state_size, max_size=10000):
-        self.max_size = max_size
-        self.state_size = state_size
-
-        # Pre-allocate fixed-size arrays
-        self.states = np.zeros((max_size, state_size), dtype=np.float32)
-        self.actions = np.zeros(max_size, dtype=np.int32)
-        self.rewards = np.zeros(max_size, dtype=np.float32)
-        self.next_states = np.zeros((max_size, state_size), dtype=np.float32)
-        self.dones = np.zeros(max_size, dtype=np.bool_)
-
-        self.size = 0
-        self.position = 0
-
-    def add(self, state, action, reward, next_state, done):
-        """Add experience to buffer."""
-        self.states[self.position] = state
-        self.actions[self.position] = action
-        self.rewards[self.position] = reward
-        self.next_states[self.position] = next_state
-        self.dones[self.position] = done
-
-        self.size = min(self.size + 1, self.max_size)
-        self.position = (self.position + 1) % self.max_size
-
-    def sample(self, batch_size):
-        """Sample a batch of experiences."""
-        indices = np.random.randint(0, self.size, size=batch_size)
-        return (
-            self.states[indices],
-            self.actions[indices],
-            self.rewards[indices],
-            self.next_states[indices],
-            self.dones[indices]
-        )
-
-    def __len__(self):
-        return self.size
 
 #------------------------------------------------------------------------------
 # Play/Visualization Functions
