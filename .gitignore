@@ -69,6 +69,5 @@ moonlander-env/
 ehthumbs.db
 Thumbs.db
 
-# Batch files and scripts (exclude setup scripts)
+# Batch files and scripts
 *.bat
-!activate_env.bat
