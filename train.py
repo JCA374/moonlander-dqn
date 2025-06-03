@@ -124,26 +124,24 @@ class DQNAgent:
         self._update_target_network()  # Initial update to match the main network
 
     def _build_model(self):
-        """Build enhanced neural network for better learning."""
+        """Build network optimized for landing task."""
         model = Sequential()
         
-        # Input layer with proper initialization
-        model.add(Dense(128, input_shape=(self.state_size,), 
-                        activation='relu', 
-                        kernel_initializer='he_uniform'))
+        # Input layer
+        model.add(tf.keras.Input(shape=(self.state_size,)))
         
-        # Hidden layers with dropout for regularization
+        # Larger network for complex task
+        model.add(Dense(256, activation='relu', kernel_initializer='he_uniform'))
+        model.add(Dense(256, activation='relu', kernel_initializer='he_uniform'))
+        model.add(tf.keras.layers.Dropout(0.2))
         model.add(Dense(128, activation='relu', kernel_initializer='he_uniform'))
-        model.add(tf.keras.layers.Dropout(0.1))
-        
-        model.add(Dense(64, activation='relu', kernel_initializer='he_uniform'))
         
         # Output layer
         model.add(Dense(self.action_size, activation='linear'))
         
-        # Compile with better optimizer settings
-        optimizer = Adam(learning_rate=0.001, clipnorm=1.0)
-        model.compile(loss='mse', optimizer=optimizer)
+        # Use lower learning rate for stability
+        optimizer = Adam(learning_rate=0.0005, clipnorm=1.0)
+        model.compile(loss='huber', optimizer=optimizer)  # Huber loss for stability
         
         return model
 
@@ -171,48 +169,44 @@ class DQNAgent:
         return np.argmax(q_values[0])
 
     def replay(self):
-        """Optimized training with experiences from memory (experience replay)."""
-        if len(self.memory) < self.batch_size:
+        """Optimized training with better batch processing."""
+        if len(self.memory) < self.batch_size * 2:  # Need more samples
             return 0.0
 
-        # Use larger batches for more efficient computation
-        batch_size = self.batch_size
-
-        # Sample minibatch using EfficientReplayBuffer
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
-
-        # Process all predictions in two efficient batches
-        target_q_values = self.model.predict(
-            states, verbose=0, batch_size=batch_size)
-        next_q_values = self.target_model.predict(
-            next_states, verbose=0, batch_size=batch_size)
-
-        # Vectorize the target Q-value calculation using NumPy
-        max_next_q = np.max(next_q_values, axis=1)
-        target_for_action = rewards + (1 - dones) * self.gamma * max_next_q
-
-        # Use standard Q-learning update (vectorized)
-        action_indices = np.arange(batch_size)
-        target_q_values[action_indices, actions] = target_for_action
-
-        # Single efficient training step - removed workers and use_multiprocessing
-        history = self.model.fit(
-            states, target_q_values,
-            epochs=1,
-            verbose=0,
-            batch_size=batch_size
-        )
-
-        # Update target network less frequently
+        # Train multiple times per replay for faster learning
+        total_loss = 0
+        for _ in range(2):  # Train twice per call
+            # Sample batch
+            states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
+            
+            # Clip rewards for stability
+            rewards = np.clip(rewards, -10, 10)
+            
+            # Calculate targets
+            current_q = self.model.predict(states, verbose=0)
+            next_q = self.target_model.predict(next_states, verbose=0)
+            
+            targets = current_q.copy()
+            for i in range(self.batch_size):
+                if dones[i]:
+                    targets[i][actions[i]] = rewards[i]
+                else:
+                    targets[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q[i])
+            
+            # Train
+            history = self.model.fit(states, targets, epochs=1, verbose=0, batch_size=self.batch_size)
+            total_loss += history.history['loss'][0]
+        
+        # Update target network
         self.step_counter += 1
         if self.step_counter % self.update_target_freq == 0:
             self._update_target_network()
-
-        # Decay epsilon with better efficiency
+        
+        # Decay epsilon
         if self.epsilon > self.epsilon_min:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-
-        return history.history['loss'][0]
+        
+        return total_loss / 2
 
     def save(self, filepath):
         """Save the model weights."""
@@ -262,9 +256,9 @@ def parse_args():
                     help='Discount factor - standard value for this environment')
     parser.add_argument('--epsilon', type=float, default=1.0,
                     help='Initial exploration rate')
-    parser.add_argument('--epsilon-min', type=float, default=0.1,
+    parser.add_argument('--epsilon-min', type=float, default=0.05,
                     help='Minimum exploration rate - balanced for exploration/exploitation')
-    parser.add_argument('--epsilon-decay', type=float, default=0.997,
+    parser.add_argument('--epsilon-decay', type=float, default=0.9995,
                     help='Exploration rate decay (optimized for better exploration)')
     parser.add_argument('--learning-rate', type=float, default=0.0005,
                     help='Learning rate - conservative for stable learning')
@@ -398,36 +392,49 @@ def optimized_train_loop(env, agent, args, logger):
             done = terminated or truncated
 
             # Apply proper reward scaling for LunarLander
-            # LunarLander rewards range from -100 to +140
             if reward > 100:  # Successful landing
-                scaled_reward = reward  # Keep full reward
+                scaled_reward = reward * 1.5  # Amplify success
             elif reward < -100:  # Crash
-                scaled_reward = reward  # Keep full penalty
+                scaled_reward = reward
             else:
-                scaled_reward = reward * 0.5  # Moderate scaling for other rewards
+                scaled_reward = reward * 0.5
             
-            # Apply additional reward shaping to discourage hovering
             # Extract state components
             x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
             
-            # Add landing incentive - give extra reward for getting closer to ground with proper orientation
-            if abs(x) < 0.3 and y < 0.2 and abs(angle) < 0.2 and abs(vy) < 0.2:
-                # Give bonus for being very close to landing
-                scaled_reward += 0.2
-                
-                # Extra strong incentive if legs are contacting but not yet landed
-                if (left_leg == 1 or right_leg == 1) and not done:
-                    scaled_reward += 0.5
+            # STRONG ANTI-HOVERING MEASURES
+            hover_detected = False
             
-            # Add stronger hover penalty - discourage hovering above landing zone
-            if abs(x) < 0.3 and y > 0.05 and y < 0.2 and abs(vy) < 0.1 and abs(vx) < 0.1:
-                # Progressive penalty - gets worse the longer it hovers
-                hover_penalty = -0.3 * (1 + step / 100)  # Increases over time
+            # Check for hovering behavior
+            if abs(x) < 0.4 and 0.02 < y < 0.3 and abs(vy) < 0.15 and abs(vx) < 0.15:
+                hover_detected = True
+                # Severe progressive penalty
+                hover_penalty = -1.0 - (step / 100)  # Gets worse over time
                 scaled_reward += hover_penalty
                 
-            # Add strong incentive to commit to landing when very close
-            if y < 0.1 and abs(vy) < 0.3:
-                scaled_reward += 2.0  # Strong bonus for final approach
+                # Terminate episode if hovering too long
+                if step > 200:
+                    done = True
+                    scaled_reward -= 20.0  # Massive penalty
+                    logger.warning(f"Episode {episode}: Terminated for hovering at step {step}")
+            
+            # STRONG LANDING INCENTIVES
+            # Progressive bonus for getting close to ground
+            if y < 0.5 and not hover_detected:
+                proximity_bonus = (0.5 - y) * 2.0
+                scaled_reward += proximity_bonus
+                
+                # Extra bonus for good landing approach
+                if y < 0.2 and abs(vy) < 0.5 and abs(angle) < 0.3:
+                    scaled_reward += 5.0
+                    
+                    # Huge bonus if legs touching
+                    if left_leg == 1 or right_leg == 1:
+                        scaled_reward += 10.0
+            
+            # Time pressure - encourage faster landing
+            time_penalty = -0.01 * (step / 100)
+            scaled_reward += time_penalty
             
             # Store experience
             agent.remember(state, action, scaled_reward, next_state, done)
