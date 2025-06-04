@@ -12,6 +12,7 @@ from datetime import datetime
 import json
 import matplotlib.pyplot as plt
 
+
 # Import TensorFlow
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -350,22 +351,28 @@ def find_best_model(results_dir):
     return best_model_path
 
 def optimized_train_loop(env, agent, args, logger):
-    """Optimized training loop for faster learning."""
+    """Optimized training loop for faster learning with aggressive landing incentives."""
     # Pre-allocate arrays for metrics with more efficient data types
-    episode_rewards = np.zeros(args.episodes, dtype=np.float32)  # Use float32 instead of float64
-    episode_steps = np.zeros(args.episodes, dtype=np.int32)      # Use int32 instead of int64
-    episode_losses = np.zeros(args.episodes, dtype=np.float32)   # Use float32 instead of float64
+    episode_rewards = np.zeros(args.episodes, dtype=np.float32)
+    episode_steps = np.zeros(args.episodes, dtype=np.int32)
+    episode_losses = np.zeros(args.episodes, dtype=np.float32)
 
     # Track best reward for model saving
     best_reward = -float('inf')
 
-    # Reduce model saving frequency - save only best and final models
+    # Track landing statistics
+    landing_attempts = 0
+    successful_landings = 0
+    crashes = 0
+    hover_episodes = 0
+
+    # Model saving directory
     model_dir = os.path.join(args.output_dir, 'current_run', 'models')
-    
+
     # Increase memory allocation for training
-    # Pre-allocate a larger experience replay buffer for better performance
-    memory_blocks = max(5, int(args.memory_size * 1.5))  # 50% more memory
-    logger.info(f"Allocating larger replay buffer with {memory_blocks} blocks for better performance")
+    memory_blocks = max(5, int(args.memory_size * 1.5))
+    logger.info(
+        f"Allocating larger replay buffer with {memory_blocks} blocks for better performance")
 
     # Vectorized epsilon decay planning
     epsilon_schedule = np.maximum(
@@ -381,6 +388,11 @@ def optimized_train_loop(env, agent, args, logger):
         total_reward = 0
         losses = []
 
+        # Track episode behavior
+        min_altitude = float('inf')
+        hover_time = 0
+        landing_attempted = False
+
         # Set current epsilon from pre-computed schedule
         agent.epsilon = epsilon_schedule[episode]
 
@@ -391,51 +403,75 @@ def optimized_train_loop(env, agent, args, logger):
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
+            # Extract state components for analysis
+            x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
+
+            # Track minimum altitude
+            min_altitude = min(min_altitude, y)
+
+            # Check if landing was attempted
+            if y < 0.5:
+                landing_attempted = True
+
+            # AGGRESSIVE REWARD SHAPING
             # Apply proper reward scaling for LunarLander
             if reward > 100:  # Successful landing
-                scaled_reward = reward * 1.5  # Amplify success
+                scaled_reward = reward * 2.0  # DOUBLE success reward
+                successful_landings += 1
+                logger.info(
+                    f"Episode {episode}: SUCCESSFUL LANDING! Reward: {reward}")
             elif reward < -100:  # Crash
-                scaled_reward = reward
+                scaled_reward = reward * 0.5  # Reduce crash penalty to encourage trying
+                crashes += 1
+                if episode % 50 == 0:  # Log crashes periodically
+                    logger.info(
+                        f"Episode {episode}: Crash at altitude {y:.3f}")
             else:
-                scaled_reward = reward * 0.5
-            
-            # Extract state components
-            x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
-            
+                scaled_reward = reward
+
+            # AGGRESSIVE ALTITUDE PENALTY - Force descent
+            if y > 0.5:
+                altitude_penalty = -0.5 * y  # Penalty proportional to altitude
+                scaled_reward += altitude_penalty
+
             # STRONG ANTI-HOVERING MEASURES
             hover_detected = False
-            
-            # Check for hovering behavior
             if abs(x) < 0.4 and 0.02 < y < 0.3 and abs(vy) < 0.15 and abs(vx) < 0.15:
                 hover_detected = True
-                # Severe progressive penalty
-                hover_penalty = -1.0 - (step / 100)  # Gets worse over time
+                hover_time += 1
+                hover_penalty = -2.0 - (step / 50)  # Even stronger penalty
                 scaled_reward += hover_penalty
-                
-                # Terminate episode if hovering too long
-                if step > 200:
+
+                if step > 150:  # Earlier termination
                     done = True
-                    scaled_reward -= 20.0  # Massive penalty
-                    logger.warning(f"Episode {episode}: Terminated for hovering at step {step}")
-            
-            # STRONG LANDING INCENTIVES
-            # Progressive bonus for getting close to ground
+                    scaled_reward -= 50.0
+                    hover_episodes += 1
+                    logger.warning(
+                        f"Episode {episode}: Terminated for hovering at step {step}")
+
+            # MASSIVE LANDING INCENTIVES
             if y < 0.5 and not hover_detected:
-                proximity_bonus = (0.5 - y) * 2.0
+                # Exponential bonus as altitude decreases
+                # Exponential increase near ground
+                proximity_bonus = 5.0 * np.exp(-y)
                 scaled_reward += proximity_bonus
-                
-                # Extra bonus for good landing approach
+
+                # Huge bonus for landing configuration
                 if y < 0.2 and abs(vy) < 0.5 and abs(angle) < 0.3:
-                    scaled_reward += 5.0
-                    
-                    # Huge bonus if legs touching
+                    scaled_reward += 20.0  # Massive bonus
+
+                    # Extreme bonus if legs touching
                     if left_leg == 1 or right_leg == 1:
-                        scaled_reward += 10.0
-            
-            # Time pressure - encourage faster landing
-            time_penalty = -0.01 * (step / 100)
+                        scaled_reward += 50.0  # Huge incentive to touch down
+
+            # Strong time pressure
+            time_penalty = -0.05 * (step / 100)
             scaled_reward += time_penalty
-            
+
+            # Penalty for using too much fuel (main engine)
+            if action == 2:  # Main engine
+                scaled_reward -= 0.2  # Small penalty to discourage constant thrust
+
             # Store experience
             agent.remember(state, action, scaled_reward, next_state, done)
 
@@ -447,14 +483,16 @@ def optimized_train_loop(env, agent, args, logger):
 
             # Update state and tracking variables
             state = next_state
-            total_reward += reward
-            
-            # Track hovering behavior
-            if step % 50 == 0:
-                if diagnose_hovering(next_state, step):
-                    logger.warning(f"Episode {episode}: Hovering detected at step {step}")
+            total_reward += reward  # Track original reward for logging
+
+            # Debug output for first few episodes
+            if episode < 5 and step % 100 == 0:
+                logger.info(f"Episode {episode}, Step {step}: Y={y:.2f}, Action={action}, "
+                            f"Scaled Reward={scaled_reward:.2f}")
 
             if done:
+                if landing_attempted:
+                    landing_attempts += 1
                 break
 
         # Update metrics
@@ -462,36 +500,61 @@ def optimized_train_loop(env, agent, args, logger):
         episode_steps[episode] = step + 1
         episode_losses[episode] = np.mean(losses) if losses else 0
 
-        # Log progress (less frequently)
-        if episode % 20 == 0:
-            recent_rewards = episode_rewards[max(0, episode-20):episode+1]
+        # Log progress with more detail
+        if episode % 10 == 0:
+            recent_rewards = episode_rewards[max(0, episode-10):episode+1]
             logger.info(f'Episode {episode}/{args.episodes} - '
                         f'Reward: {total_reward:.2f}, '
-                        f'Avg20: {np.mean(recent_rewards):.2f}, '
+                        f'Avg10: {np.mean(recent_rewards):.2f}, '
+                        f'Min Alt: {min_altitude:.3f}, '
                         f'Epsilon: {agent.epsilon:.4f}')
+
+            # Log landing statistics
+            if episode > 0:
+                logger.info(f'Landing Stats - Attempts: {landing_attempts}, '
+                            f'Successes: {successful_landings}, '
+                            f'Crashes: {crashes}, '
+                            f'Hovers: {hover_episodes}')
 
         # Save model if it's better than previous best
         if total_reward > best_reward:
             best_reward = total_reward
             agent.save(os.path.join(model_dir, 'best_model'))
+            logger.info(f'New best model saved with reward: {best_reward:.2f}')
 
-            # Only log best model saves, not every improvement
-            if total_reward > best_reward * 1.1:  # 10% improvement
-                logger.info(
-                    f'New best model saved with reward: {best_reward:.2f}')
+        # Also save if we get our first successful landing
+        if successful_landings == 1 and total_reward > 0:
+            agent.save(os.path.join(model_dir, 'first_landing_model'))
+            logger.info('First successful landing! Model saved.')
 
-        # Evaluate less frequently
+        # Evaluate less frequently but more thoroughly
         if args.eval_freq > 0 and episode % args.eval_freq == 0:
-            eval_reward, _, success_rate = evaluate(
-                env, agent, max(1, args.eval_episodes // 2), args.seed,
+            eval_reward, eval_steps, success_rate = evaluate(
+                env, agent, args.eval_episodes, args.seed,
                 args.max_steps, render=False
             )
             logger.info(f'Evaluation - Reward: {eval_reward:.2f}, '
+                        f'Steps: {eval_steps:.2f}, '
                         f'Success: {success_rate:.2f}')
+
+            # If still no success after 200 episodes, increase exploration
+            if episode >= 200 and success_rate == 0:
+                agent.epsilon = min(0.5, agent.epsilon * 2)
+                logger.warning(
+                    f"No success yet - increasing exploration to {agent.epsilon:.3f}")
 
     # Save final model
     agent.save(os.path.join(model_dir, 'final_model'))
     logger.info('Training completed - Final model saved')
+
+    # Log final statistics
+    logger.info(f'\nFinal Training Statistics:')
+    logger.info(f'Total Landing Attempts: {landing_attempts}')
+    logger.info(f'Successful Landings: {successful_landings}')
+    logger.info(
+        f'Success Rate: {successful_landings/max(1, landing_attempts):.2%}')
+    logger.info(f'Crashes: {crashes}')
+    logger.info(f'Hover Episodes: {hover_episodes}')
 
     # Only create plots at the end
     plot_learning_curves(episode_rewards, episode_steps, episode_losses,
