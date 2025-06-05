@@ -125,24 +125,36 @@ class DQNAgent:
         self._update_target_network()  # Initial update to match the main network
 
     def _build_model(self):
-        """Build network optimized for landing task."""
+        """Enhanced network architecture for complex landing control."""
         model = Sequential()
         
         # Input layer
         model.add(tf.keras.Input(shape=(self.state_size,)))
         
-        # Larger network for complex task
+        # First hidden layer with larger capacity
+        model.add(Dense(512, activation='relu', kernel_initializer='he_uniform'))
+        model.add(tf.keras.layers.BatchNormalization())
+        model.add(tf.keras.layers.Dropout(0.1))
+        
+        # Second hidden layer
         model.add(Dense(256, activation='relu', kernel_initializer='he_uniform'))
-        model.add(Dense(256, activation='relu', kernel_initializer='he_uniform'))
-        model.add(tf.keras.layers.Dropout(0.2))
+        model.add(tf.keras.layers.BatchNormalization())
+        model.add(tf.keras.layers.Dropout(0.1))
+        
+        # Third hidden layer for fine control
         model.add(Dense(128, activation='relu', kernel_initializer='he_uniform'))
         
         # Output layer
-        model.add(Dense(self.action_size, activation='linear'))
+        model.add(Dense(self.action_size, activation='linear', kernel_initializer='he_uniform'))
         
-        # Use lower learning rate for stability
-        optimizer = Adam(learning_rate=0.0005, clipnorm=1.0)
-        model.compile(loss='huber', optimizer=optimizer)  # Huber loss for stability
+        # Use Adam with gradient clipping and lower learning rate
+        optimizer = Adam(
+            learning_rate=0.0001,  # Much lower learning rate
+            clipnorm=0.5,         # Prevent gradient explosion
+            epsilon=1e-7
+        )
+        
+        model.compile(loss='mse', optimizer=optimizer)  # MSE often more stable than Huber
         
         return model
 
@@ -170,44 +182,44 @@ class DQNAgent:
         return np.argmax(q_values[0])
 
     def replay(self):
-        """Optimized training with better batch processing."""
-        if len(self.memory) < self.batch_size * 2:  # Need more samples
+        """Stable training with proper target network updates."""
+        if len(self.memory) < self.batch_size * 4:
             return 0.0
 
-        # Train multiple times per replay for faster learning
-        total_loss = 0
-        for _ in range(2):  # Train twice per call
-            # Sample batch
-            states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
-            
-            # Clip rewards for stability
-            rewards = np.clip(rewards, -10, 10)
-            
-            # Calculate targets
-            current_q = self.model.predict(states, verbose=0)
-            next_q = self.target_model.predict(next_states, verbose=0)
-            
-            targets = current_q.copy()
-            for i in range(self.batch_size):
-                if dones[i]:
-                    targets[i][actions[i]] = rewards[i]
-                else:
-                    targets[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q[i])
-            
-            # Train
-            history = self.model.fit(states, targets, epochs=1, verbose=0, batch_size=self.batch_size)
-            total_loss += history.history['loss'][0]
+        # Sample batch
+        states, actions, rewards, next_states, dones = self.memory.sample(self.batch_size)
         
-        # Update target network
+        # No reward clipping - let the agent learn from real rewards
+        # rewards = np.clip(rewards, -10, 10)  # REMOVE THIS LINE
+        
+        # Compute current Q values
+        current_q = self.model.predict(states, verbose=0)
+        
+        # Compute next Q values using target network
+        next_q = self.target_model.predict(next_states, verbose=0)
+        
+        # Compute targets using Bellman equation
+        targets = current_q.copy()
+        for i in range(self.batch_size):
+            if dones[i]:
+                targets[i][actions[i]] = rewards[i]
+            else:
+                targets[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q[i])
+        
+        # Single training step with full batch
+        history = self.model.fit(states, targets, epochs=1, verbose=0, batch_size=self.batch_size)
+        loss = history.history['loss'][0]
+        
+        # Update target network more frequently
         self.step_counter += 1
         if self.step_counter % self.update_target_freq == 0:
             self._update_target_network()
         
-        # Decay epsilon
+        # Slower epsilon decay
         if self.epsilon > self.epsilon_min:
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         
-        return total_loss / 2
+        return loss
 
     def save(self, filepath):
         """Save the model weights."""
@@ -413,64 +425,61 @@ def optimized_train_loop(env, agent, args, logger):
             if y < 0.5:
                 landing_attempted = True
 
-            # AGGRESSIVE REWARD SHAPING
-            # Apply proper reward scaling for LunarLander
-            if reward > 100:  # Successful landing
-                scaled_reward = reward * 2.0  # DOUBLE success reward
+            # BALANCED REWARD SHAPING - Replace existing reward shaping code
+            original_reward = reward
+
+            # Only apply minimal scaling to extreme rewards
+            if reward > 200:  # Exceptional landing
+                scaled_reward = reward * 1.2
                 successful_landings += 1
                 logger.info(
                     f"Episode {episode}: SUCCESSFUL LANDING! Reward: {reward}")
-            elif reward < -100:  # Crash
-                scaled_reward = reward * 0.5  # Reduce crash penalty to encourage trying
+            elif reward < -100:  # Hard crash
+                scaled_reward = reward * 0.8  # Slightly reduce crash penalty
                 crashes += 1
                 if episode % 50 == 0:  # Log crashes periodically
                     logger.info(
                         f"Episode {episode}: Crash at altitude {y:.3f}")
             else:
-                scaled_reward = reward
+                scaled_reward = reward  # Keep normal rewards unchanged
 
-            # AGGRESSIVE ALTITUDE PENALTY - Force descent
-            if y > 0.5:
-                altitude_penalty = -0.5 * y  # Penalty proportional to altitude
-                scaled_reward += altitude_penalty
+            # PROGRESSIVE LANDING GUIDANCE (replaces aggressive penalties)
+            if y < 1.0:  # In descent phase
+                # Reward good approach angle and position
+                if abs(x) < 0.5:  # Reasonable horizontal position
+                    position_bonus = (0.5 - abs(x)) * 0.5
+                    scaled_reward += position_bonus
+                    
+                    # Reward controlled descent
+                    if y < 0.5 and abs(vy) < 1.5:  # Controlled approach
+                        approach_bonus = (1.5 - abs(vy)) * 0.3
+                        scaled_reward += approach_bonus
+                        
+                        # Big bonus for legs touching ground
+                        if left_leg == 1 or right_leg == 1:
+                            scaled_reward += 5.0
+                            
+                            # Massive bonus if both legs touch (successful landing setup)
+                            if left_leg == 1 and right_leg == 1:
+                                scaled_reward += 10.0
 
-            # STRONG ANTI-HOVERING MEASURES
-            hover_detected = False
-            if abs(x) < 0.4 and 0.02 < y < 0.3 and abs(vy) < 0.15 and abs(vx) < 0.15:
-                hover_detected = True
-                hover_time += 1
-                hover_penalty = -2.0 - (step / 50)  # Even stronger penalty
-                scaled_reward += hover_penalty
+            # SMART HOVERING DETECTION (less aggressive)
+            hover_penalty = 0
+            if abs(x) < 0.3 and 0.05 < y < 0.2 and abs(vy) < 0.1 and abs(vx) < 0.1:
+                # Only penalize if hovering for too long
+                if step > 300:  # Allow time to learn
+                    hover_penalty = -0.5  # Gentle penalty
+                    scaled_reward += hover_penalty
+                    hover_time += 1
+                    if step > 400:  # Only terminate if hovering very long
+                        done = True
+                        hover_episodes += 1
+                        logger.warning(
+                            f"Episode {episode}: Terminated for excessive hovering at step {step}")
 
-                if step > 150:  # Earlier termination
-                    done = True
-                    scaled_reward -= 50.0
-                    hover_episodes += 1
-                    logger.warning(
-                        f"Episode {episode}: Terminated for hovering at step {step}")
-
-            # MASSIVE LANDING INCENTIVES
-            if y < 0.5 and not hover_detected:
-                # Exponential bonus as altitude decreases
-                # Exponential increase near ground
-                proximity_bonus = 5.0 * np.exp(-y)
-                scaled_reward += proximity_bonus
-
-                # Huge bonus for landing configuration
-                if y < 0.2 and abs(vy) < 0.5 and abs(angle) < 0.3:
-                    scaled_reward += 20.0  # Massive bonus
-
-                    # Extreme bonus if legs touching
-                    if left_leg == 1 or right_leg == 1:
-                        scaled_reward += 50.0  # Huge incentive to touch down
-
-            # Strong time pressure
-            time_penalty = -0.05 * (step / 100)
-            scaled_reward += time_penalty
-
-            # Penalty for using too much fuel (main engine)
-            if action == 2:  # Main engine
-                scaled_reward -= 0.2  # Small penalty to discourage constant thrust
+            # MINIMAL TIME PRESSURE (remove aggressive time penalties)
+            if step > 500:  # Only late in episode
+                scaled_reward -= 0.01
 
             # Store experience
             agent.remember(state, action, scaled_reward, next_state, done)
