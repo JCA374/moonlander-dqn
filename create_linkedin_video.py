@@ -243,22 +243,20 @@ class VideoCreator:
     def _add_title_and_progress(self, composite, checkpoint, current_ep, total_eps):
         """Add title and progress bar."""
         font = cv2.FONT_HERSHEY_SIMPLEX
+        width = composite.shape[1]
 
-        # Main title
+        # Main title (centered)
         title = "AI Learning to Land on the Moon"
-        cv2.putText(composite, title, (50, 40), font, 1.2, (255, 255, 255), 3)
+        title_size = cv2.getTextSize(title, font, 1.0, 2)[0]
+        title_x = (width - title_size[0]) // 2
+        cv2.putText(composite, title, (title_x, 35), font, 1.0, (255, 255, 255), 2)
 
-        # Subtitle
-        subtitle = "Deep Reinforcement Learning with TensorFlow"
-        cv2.putText(composite, subtitle, (50, 70),
-                    font, 0.6, (200, 200, 200), 2)
-
-        # Progress bar
+        # Progress bar (bottom)
         progress = (current_ep + 1) / total_eps
-        bar_width = 400
-        bar_height = 10
+        bar_width = width - 100
+        bar_height = 8
         bar_x = 50
-        bar_y = composite.shape[0] - 30
+        bar_y = composite.shape[0] - 25
 
         # Background
         cv2.rectangle(composite, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height),
@@ -269,9 +267,11 @@ class VideoCreator:
         cv2.rectangle(composite, (bar_x, bar_y), (bar_x + progress_width, bar_y + bar_height),
                       (0, 255, 100), -1)
 
-        # Progress text
-        cv2.putText(composite, f"Learning Progress: {progress*100:.0f}%",
-                    (bar_x + bar_width + 20, bar_y + bar_height), font, 0.5, (255, 255, 255), 1)
+        # Progress text (centered below bar)
+        progress_text = f"Training Progress: {progress*100:.0f}%"
+        text_size = cv2.getTextSize(progress_text, font, 0.6, 1)[0]
+        text_x = (width - text_size[0]) // 2
+        cv2.putText(composite, progress_text, (text_x, bar_y + 35), font, 0.6, (255, 255, 255), 1)
 
     def _wrap_text(self, text, max_chars):
         """Wrap text to multiple lines."""
