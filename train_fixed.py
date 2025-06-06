@@ -297,17 +297,50 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
-            # FIXED: MINIMAL reward shaping - only amplify existing signals
+            # Extract state components for intelligent shaping
+            x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
+
+            # FIXED: More nuanced reward shaping
             original_reward = reward
             scaled_reward = reward
 
-            # Only amplify success/failure, don't create new rewards
-            # FIXED: Successful landing (was looking for >200)
-            if reward > 100:
-                scaled_reward = reward * 1.2  # Slightly amplify success
-            elif reward < -100:  # Crash
-                scaled_reward = reward  # Keep crash penalty as-is
-            # Everything else unchanged - let environment teach the agent
+            # 1. Amplify large positive rewards (successful landing bonus)
+            if reward > 50:  # Lowered threshold
+                scaled_reward = reward * 1.5  # Stronger amplification
+            elif reward < -50:  # Significant crash
+                scaled_reward = reward * 0.8  # Slightly reduce to encourage exploration
+
+            # 2. Add shaping to encourage landing attempts
+            if y < 0.5:  # Close to ground
+                # Encourage being centered over landing pad
+                if abs(x) < 0.5:
+                    scaled_reward += 0.5 * (0.5 - abs(x))  # Up to +0.25 bonus
+                    
+                    # Encourage slow descent when close to ground
+                    if y < 0.2 and abs(vy) < 1.0:
+                        scaled_reward += 1.0  # Bonus for controlled approach
+                        
+                        # Big bonus for touching legs
+                        if left_leg or right_leg:
+                            scaled_reward += 2.0
+                            
+                            # Huge bonus for both legs touching (pre-landing)
+                            if left_leg and right_leg and abs(vx) < 0.5:
+                                scaled_reward += 5.0  # This encourages actual landing
+
+            # 3. Gentle anti-hovering mechanism
+            # Only penalize hovering if near ground for too long
+            if 0.05 < y < 0.3 and abs(vy) < 0.1 and step > 300:
+                scaled_reward -= 0.2  # Small penalty to encourage landing
+
+            # 4. Time pressure only late in episode
+            if step > 500:  # Only in last 100 steps
+                scaled_reward -= 0.05  # Gentle encouragement to land
+
+            # 5. Additional timeout prevention
+            if step >= args.max_steps - 1:  # About to timeout
+                # Apply penalty for timeout
+                scaled_reward -= 50.0  # Significant penalty
 
             # Store experience with scaled reward
             agent.remember(state, action, scaled_reward, next_state, done)
@@ -322,15 +355,43 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             total_reward += scaled_reward  # FIXED: Track scaled_reward consistently
 
             if done:
-                # FIXED: Proper success detection
-                if terminated and original_reward > 0:  # FIXED: Was checking >200
+                # If episode ended due to max steps (timeout), treat differently
+                if step >= args.max_steps - 1:
+                    # Override any positive reward for timeouts
+                    if scaled_reward > 0:
+                        scaled_reward = -20.0  # Ensure timeout is always negative
+                        # Update the total reward to reflect the penalty
+                        total_reward = total_reward - original_reward + scaled_reward
+
+                # FIXED: Proper success detection for LunarLander
+                # Check multiple conditions for success
+                landed_successfully = False
+                
+                if terminated:  # Episode ended naturally (not truncated)
+                    # Check if both legs are touching
+                    if left_leg and right_leg:
+                        # Check if velocity is low (good landing)
+                        if abs(vx) < 0.5 and abs(vy) < 0.5:
+                            # Check if near landing pad center
+                            if abs(x) < 0.5:
+                                landed_successfully = True
+                    
+                    # Alternative: if total reward is very positive, count as success
+                    if total_reward > 200:
+                        landed_successfully = True
+                
+                if landed_successfully:
                     successful_landings += 1
-                    logger.info(
-                        f"Episode {episode}: SUCCESSFUL LANDING! Original reward: {original_reward:.2f}, Scaled: {scaled_reward:.2f}")
+                    logger.info(f"Episode {episode}: SUCCESSFUL LANDING! Total reward: {total_reward:.2f}, Final reward: {original_reward:.2f}")
                 elif step >= args.max_steps - 1:
                     timeouts += 1
-                elif original_reward <= -100:
+                    logger.info(f"Episode {episode}: TIMEOUT after {step} steps, reward: {total_reward:.2f}")
+                elif terminated and total_reward < -50:
                     crashes += 1
+                    logger.info(f"Episode {episode}: CRASH, reward: {total_reward:.2f}")
+                else:
+                    logger.info(f"Episode {episode}: Episode ended, reward: {total_reward:.2f}")
+                
                 break
 
         # Update metrics
