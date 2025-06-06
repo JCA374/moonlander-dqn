@@ -270,7 +270,7 @@ def find_best_model(results_dir):
     return None
 
 
-def optimized_train_loop(env, agent, args, logger):
+def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
     """FIXED training loop with corrected success detection and reward tracking."""
 
     episode_rewards = np.zeros(args.episodes, dtype=np.float32)
@@ -360,6 +360,12 @@ def optimized_train_loop(env, agent, args, logger):
             agent.save(os.path.join(model_dir, 'best_model'))
             logger.info(f'New best model saved with reward: {best_reward:.2f}')
 
+        # Auto-save model every 25 episodes
+        if (episode + 1) % 25 == 0:
+            episode_model_path = os.path.join(episode_saves_dir, f'model_episode_{episode + 1}')
+            agent.save(episode_model_path)
+            logger.info(f'Auto-saved model at episode {episode + 1} to {episode_model_path}')
+
         # Evaluation
         if args.eval_freq > 0 and episode % args.eval_freq == 0 and episode > 0:
             eval_reward, eval_steps, success_rate = evaluate(
@@ -424,8 +430,10 @@ def train(args, logger):
     # Setup directories
     run_dir = os.path.join(args.output_dir, 'current_run')
     model_dir = os.path.join(run_dir, 'models')
+    episode_saves_dir = os.path.join(run_dir, 'episode_saves')
 
     os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(episode_saves_dir, exist_ok=True)
 
     # Save arguments
     with open(os.path.join(run_dir, 'args.json'), 'w') as f:
@@ -478,7 +486,7 @@ def train(args, logger):
 
     # Start training
     logger.info('Starting FIXED training loop...')
-    agent, final_best_reward = optimized_train_loop(env, agent, args, logger)
+    agent, final_best_reward = optimized_train_loop(env, agent, args, logger, episode_saves_dir)
 
     env.close()
     logger.info(

@@ -15,3 +15,7 @@ psutil>=5.9.0
 # Optional: Jupyter for experimentation (uncomment if needed)
 # jupyter>=1.0.0
 # ipykernel>=6.0.0
+
+#Video
+opencv-python 
+imageio 

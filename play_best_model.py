@@ -38,11 +38,11 @@ class SimpleDQNAgent:
         
         # Match the exact architecture from train.py
         # First layer - use the same approach with build() instead of input_shape
-        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
+        model.add(Dense(64, activation='relu', kernel_initializer='he_uniform'))
         model.build((None, self.state_size))
             
         # Single hidden layer - exact same as in train.py
-        model.add(Dense(32, activation='relu', kernel_initializer='he_uniform'))
+        model.add(Dense(64, activation='relu', kernel_initializer='he_uniform'))
         
         # Output layer - linear activation for Q-values
         model.add(Dense(self.action_size, activation='linear'))
