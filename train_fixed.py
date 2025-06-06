@@ -38,6 +38,43 @@ except Exception as e:
     print(f"CPU optimization failed: {e}, using defaults")
 
 
+class OutcomeMonitor:
+    """Monitor training outcomes to ensure healthy learning distribution."""
+
+    def __init__(self):
+        self.outcomes = {"SUCCESS": 0, "CRASH": 0, "TIMEOUT": 0}
+        self.total_episodes = 0
+
+    def record(self, outcome_type):
+        """Record an episode outcome."""
+        if outcome_type in self.outcomes:
+            self.outcomes[outcome_type] += 1
+            self.total_episodes += 1
+
+    def get_rates(self):
+        """Get current outcome rates."""
+        if self.total_episodes == 0:
+            return {"SUCCESS": 0, "CRASH": 0, "TIMEOUT": 0}
+
+        return {
+            outcome: count / self.total_episodes
+            for outcome, count in self.outcomes.items()
+        }
+
+    def is_healthy(self):
+        """Check if outcome distribution is healthy for learning."""
+        rates = self.get_rates()
+        # Healthy: >30% success OR <30% timeout
+        return rates["SUCCESS"] > 0.3 or rates["TIMEOUT"] < 0.3
+
+    def get_summary(self):
+        """Get a summary string of outcomes."""
+        rates = self.get_rates()
+        return (f"Success: {rates['SUCCESS']:.1%}, "
+                f"Crash: {rates['CRASH']:.1%}, "
+                f"Timeout: {rates['TIMEOUT']:.1%}")
+
+
 class EfficientReplayBuffer:
     """Efficient NumPy-based replay buffer."""
 
@@ -194,9 +231,9 @@ class DQNAgent:
 
 
 def parse_args():
-    """Parse command line arguments with FIXED defaults."""
+    """Parse command line arguments with UPDATED defaults for timeout penalties."""
     parser = argparse.ArgumentParser(
-        description='FIXED LunarLander-v3 Training')
+        description='LunarLander-v3 Training with Timeout Penalties')
 
     parser.add_argument('--mode', type=str, default='train',
                         choices=['train', 'play'])
@@ -204,18 +241,20 @@ def parse_args():
     parser.add_argument('--model-path', type=str, default=None)
     parser.add_argument('--episodes', type=int, default=500)
     parser.add_argument('--restart', action='store_true')
-    # FIXED: Reasonable limit
-    parser.add_argument('--max-steps', type=int, default=600)
+    parser.add_argument('--max-steps', type=int,
+                        default=500)  # REDUCED from 600
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--memory-size', type=int, default=50000)
-    parser.add_argument('--gamma', type=float,
-                        default=0.99)  # FIXED: Proper gamma
+    parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--epsilon', type=float, default=1.0)
-    parser.add_argument('--epsilon-min', type=float, default=0.01)
+    parser.add_argument('--epsilon-min', type=float,
+                        default=0.05)  # HIGHER minimum
     parser.add_argument('--epsilon-decay', type=float,
-                        default=0.995)  # FIXED: Better decay
-    parser.add_argument('--learning-rate', type=float, default=0.0005)
-    parser.add_argument('--update-target-freq', type=int, default=20)
+                        default=0.999)  # SLOWER decay
+    parser.add_argument('--learning-rate', type=float,
+                        default=0.001)  # SLIGHTLY higher
+    parser.add_argument('--update-target-freq', type=int,
+                        default=10)  # MORE frequent
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--eval-freq', type=int, default=50)
     parser.add_argument('--eval-episodes', type=int, default=3)
@@ -271,7 +310,7 @@ def find_best_model(results_dir):
 
 
 def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
-    """FIXED training loop with corrected success detection and reward tracking."""
+    """UPDATED training loop with better timeout handling."""
 
     episode_rewards = np.zeros(args.episodes, dtype=np.float32)
     episode_steps = np.zeros(args.episodes, dtype=np.int32)
@@ -279,7 +318,7 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
 
     best_reward = -float('inf')
 
-    # FIXED: Proper tracking variables
+    # Outcome tracking
     successful_landings = 0
     crashes = 0
     timeouts = 0
@@ -288,8 +327,7 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
 
     for episode in range(args.episodes):
         state, _ = env.reset(seed=args.seed if episode == 0 else None)
-
-        total_reward = 0  # FIXED: Will track scaled_reward consistently
+        total_reward = 0
         losses = []
 
         for step in range(args.max_steps):
@@ -297,104 +335,95 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
-            # Extract state components for intelligent shaping
+            # Extract state components
             x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
 
-            # FIXED: More nuanced reward shaping
+            # UPDATED reward shaping
             original_reward = reward
             scaled_reward = reward
 
-            # 1. Amplify large positive rewards (successful landing bonus)
-            if reward > 50:  # Lowered threshold
-                scaled_reward = reward * 1.5  # Stronger amplification
-            elif reward < -50:  # Significant crash
-                scaled_reward = reward * 0.8  # Slightly reduce to encourage exploration
+            # 1. Amplify environment rewards
+            if reward > 50:
+                scaled_reward = reward * 1.5
+            elif reward < -50:
+                scaled_reward = reward * 0.9  # Less harsh crashes
 
-            # 2. Add shaping to encourage landing attempts
-            if y < 0.5:  # Close to ground
-                # Encourage being centered over landing pad
-                if abs(x) < 0.5:
-                    scaled_reward += 0.5 * (0.5 - abs(x))  # Up to +0.25 bonus
-                    
-                    # Encourage slow descent when close to ground
-                    if y < 0.2 and abs(vy) < 1.0:
-                        scaled_reward += 1.0  # Bonus for controlled approach
-                        
-                        # Big bonus for touching legs
-                        if left_leg or right_leg:
-                            scaled_reward += 2.0
-                            
-                            # Huge bonus for both legs touching (pre-landing)
-                            if left_leg and right_leg and abs(vx) < 0.5:
-                                scaled_reward += 5.0  # This encourages actual landing
+            # 2. Landing progression bonuses
+            if y < 0.5 and abs(x) < 0.5:  # Over landing pad
+                scaled_reward += 0.5 * (0.5 - abs(x))  # Centering bonus
 
-            # 3. Gentle anti-hovering mechanism
-            # Only penalize hovering if near ground for too long
-            if 0.05 < y < 0.3 and abs(vy) < 0.1 and step > 300:
-                scaled_reward -= 0.2  # Small penalty to encourage landing
+                if y < 0.2 and abs(vy) < 1.0:  # Close to ground, controlled
+                    scaled_reward += 1.0
 
-            # 4. Time pressure only late in episode
-            if step > 500:  # Only in last 100 steps
-                scaled_reward -= 0.05  # Gentle encouragement to land
+                    if left_leg or right_leg:  # Leg contact
+                        scaled_reward += 2.0
 
-            # 5. Additional timeout prevention
-            if step >= args.max_steps - 1:  # About to timeout
-                # Apply penalty for timeout
-                scaled_reward -= 50.0  # Significant penalty
+                        # Both legs
+                        if left_leg and right_leg and abs(vx) < 0.5:
+                            scaled_reward += 5.0
 
-            # Store experience with scaled reward
+            # 3. CRITICAL: Anti-hovering penalty
+            hovering = (0.05 < y < 0.4 and abs(vy) < 0.15 and
+                        abs(vx) < 0.15 and step > 200)
+            if hovering:
+                hover_penalty = -0.5 - (step - 200) * 0.01
+                scaled_reward += hover_penalty
+
+            # 4. Time pressure
+            if step > 400:
+                scaled_reward -= 0.1
+            if step > 500:
+                scaled_reward -= 0.2
+
+            # Store experience
             agent.remember(state, action, scaled_reward, next_state, done)
 
             # Train agent
-            if step % 4 == 0:  # Train every 4 steps
+            if step % 4 == 0:
                 loss = agent.replay()
                 if loss > 0:
                     losses.append(loss)
 
             state = next_state
-            total_reward += scaled_reward  # FIXED: Track scaled_reward consistently
+            total_reward += scaled_reward
 
             if done:
-                # If episode ended due to max steps (timeout), treat differently
-                if step >= args.max_steps - 1:
-                    # Override any positive reward for timeouts
-                    if scaled_reward > 0:
-                        scaled_reward = -20.0  # Ensure timeout is always negative
-                        # Update the total reward to reflect the penalty
-                        total_reward = total_reward - original_reward + scaled_reward
-
-                # FIXED: Proper success detection for LunarLander
-                # Check multiple conditions for success
-                landed_successfully = False
-                
-                if terminated:  # Episode ended naturally (not truncated)
-                    # Check if both legs are touching
-                    if left_leg and right_leg:
-                        # Check if velocity is low (good landing)
-                        if abs(vx) < 0.5 and abs(vy) < 0.5:
-                            # Check if near landing pad center
-                            if abs(x) < 0.5:
-                                landed_successfully = True
-                    
-                    # Alternative: if total reward is very positive, count as success
-                    if total_reward > 200:
-                        landed_successfully = True
-                
-                if landed_successfully:
-                    successful_landings += 1
-                    logger.info(f"Episode {episode}: SUCCESSFUL LANDING! Total reward: {total_reward:.2f}, Final reward: {original_reward:.2f}")
-                elif step >= args.max_steps - 1:
+                # UPDATED outcome determination
+                if step >= args.max_steps - 1 or truncated:
+                    # TIMEOUT - Make this the WORST outcome
+                    timeout_penalty = -200
+                    if hovering:  # Extra penalty for hovering timeout
+                        timeout_penalty -= 50
+                    total_reward = timeout_penalty  # Override with harsh penalty
                     timeouts += 1
-                    logger.info(f"Episode {episode}: TIMEOUT after {step} steps, reward: {total_reward:.2f}")
-                elif terminated and total_reward < -50:
-                    crashes += 1
-                    logger.info(f"Episode {episode}: CRASH, reward: {total_reward:.2f}")
-                else:
-                    logger.info(f"Episode {episode}: Episode ended, reward: {total_reward:.2f}")
-                
+                    logger.info(
+                        f"Episode {episode}: TIMEOUT (penalty: {timeout_penalty})")
+
+                elif terminated:
+                    # Check for SUCCESS
+                    success_conditions = [
+                        left_leg and right_leg,
+                        abs(vx) < 0.5 and abs(vy) < 0.5,
+                        abs(x) < 0.5,
+                        total_reward > 100
+                    ]
+
+                    if sum(success_conditions) >= 3:
+                        # SUCCESS
+                        total_reward *= 1.2  # Success bonus
+                        successful_landings += 1
+                        logger.info(
+                            f"Episode {episode}: SUCCESS! Reward: {total_reward:.2f}")
+                    else:
+                        # CRASH - but not as bad as timeout
+                        crash_penalty = max(-150, total_reward)
+                        total_reward = crash_penalty
+                        crashes += 1
+                        logger.info(
+                            f"Episode {episode}: CRASH (penalty: {crash_penalty})")
                 break
 
-        # Update metrics
+        # Update metrics (rest remains the same)
         episode_rewards[episode] = total_reward
         episode_steps[episode] = step + 1
         episode_losses[episode] = np.mean(losses) if losses else 0
@@ -407,13 +436,11 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
                         f'Avg10: {np.mean(recent_rewards):.2f}, '
                         f'Epsilon: {agent.epsilon:.4f}')
 
-            # FIXED: Meaningful statistics
             if episode > 0:
                 success_rate = successful_landings / (episode + 1)
-                logger.info(f'Stats - Successes: {successful_landings}, '
-                            f'Crashes: {crashes}, '
-                            f'Timeouts: {timeouts}, '
-                            f'Success Rate: {success_rate:.2%}')
+                timeout_rate = timeouts / (episode + 1)
+                logger.info(f'Stats - Success: {successful_landings} ({success_rate:.2%}), '
+                            f'Crash: {crashes}, Timeout: {timeouts} ({timeout_rate:.2%})')
 
         # Save best model
         if total_reward > best_reward:
@@ -421,40 +448,45 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             agent.save(os.path.join(model_dir, 'best_model'))
             logger.info(f'New best model saved with reward: {best_reward:.2f}')
 
-        # Auto-save model every 25 episodes
+        # Auto-save every 25 episodes
         if (episode + 1) % 25 == 0:
-            episode_model_path = os.path.join(episode_saves_dir, f'model_episode_{episode + 1}')
+            episode_model_path = os.path.join(
+                episode_saves_dir, f'model_episode_{episode + 1}')
             agent.save(episode_model_path)
-            logger.info(f'Auto-saved model at episode {episode + 1} to {episode_model_path}')
 
         # Evaluation
         if args.eval_freq > 0 and episode % args.eval_freq == 0 and episode > 0:
             eval_reward, eval_steps, success_rate = evaluate(
                 env, agent, args.eval_episodes, args.seed, args.max_steps)
             logger.info(f'Evaluation - Reward: {eval_reward:.2f}, '
-                        f'Steps: {eval_steps:.2f}, '
-                        f'Success: {success_rate:.2%}')
+                        f'Steps: {eval_steps:.2f}, Success: {success_rate:.2%}')
 
     # Save final model
     agent.save(os.path.join(model_dir, 'final_model'))
     logger.info('Training completed - Final model saved')
 
-    # FIXED: Final statistics
+    # Final statistics
     success_rate = successful_landings / args.episodes
+    timeout_rate = timeouts / args.episodes
     logger.info(f'\nFinal Training Statistics:')
     logger.info(
         f'Successful Landings: {successful_landings}/{args.episodes} ({success_rate:.2%})')
     logger.info(f'Crashes: {crashes}')
-    logger.info(f'Timeouts: {timeouts}')
+    logger.info(f'Timeouts: {timeouts} ({timeout_rate:.2%})')
+
+    if timeout_rate > 0.3:
+        logger.warning(
+            f'High timeout rate ({timeout_rate:.2%}) - consider increasing penalties')
 
     return agent, best_reward
 
 
 def evaluate(env, agent, num_episodes, seed, max_steps):
-    """FIXED evaluation with proper success detection."""
+    """UPDATED evaluation with consistent outcome detection."""
     rewards = []
     steps = []
     successes = 0
+    timeouts = 0
 
     for episode in range(num_episodes):
         state, _ = env.reset(seed=seed + episode)
@@ -467,13 +499,25 @@ def evaluate(env, agent, num_episodes, seed, max_steps):
             done = terminated or truncated
 
             state = next_state
-            total_reward += reward  # Track original rewards for evaluation
+            total_reward += reward
             step_count += 1
 
             if done:
-                # FIXED: Proper success detection
-                if terminated and reward > 0:
-                    successes += 1
+                # Use same outcome logic as training
+                x, y, vx, vy, angle, angular_vel, left_leg, right_leg = next_state
+
+                if step >= max_steps - 1 or truncated:
+                    timeouts += 1
+                elif terminated:
+                    # Check success conditions
+                    success_conditions = [
+                        left_leg and right_leg,
+                        abs(vx) < 0.5 and abs(vy) < 0.5,
+                        abs(x) < 0.5,
+                        total_reward > 100
+                    ]
+                    if sum(success_conditions) >= 3:
+                        successes += 1
                 break
 
         rewards.append(total_reward)
