@@ -1,0 +1,26 @@
+{
+    "system": "Intel i7-8565U",
+    "ram": "32GB",
+    "cores": 4,
+    "threads": 8,
+    "optimizations": {
+        "tensorflow_threads": {
+            "intra_op": 6,
+            "inter_op": 2
+        },
+        "training_params": {
+            "batch_size": 128,
+            "memory_size": 200000,
+            "learning_rate": 0.001,
+            "epsilon_decay": 0.998,
+            "epsilon_min": 0.02,
+            "update_target_freq": 10,
+            "train_freq": 2
+        },
+        "environment_vars": {
+            "TF_ENABLE_ONEDNN_OPTS": "1",
+            "OMP_NUM_THREADS": "6",
+            "TF_CPP_MIN_LOG_LEVEL": "2"
+        }
+    }
+}
