@@ -71,3 +71,6 @@ Thumbs.db
 
 # Batch files and scripts
 *.bat
+
+#Video files
+*.mp4

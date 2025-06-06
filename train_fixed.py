@@ -29,8 +29,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 
 try:
-    tf.config.threading.set_intra_op_parallelism_threads(4)
-    tf.config.threading.set_inter_op_parallelism_threads(2)
+    tf.config.threading.set_intra_op_parallelism_threads(8)
+    tf.config.threading.set_inter_op_parallelism_threads(4)
     policy = tf.keras.mixed_precision.Policy('float32')
     tf.keras.mixed_precision.set_global_policy(policy)
     print("CPU optimization applied successfully")
