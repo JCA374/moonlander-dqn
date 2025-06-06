@@ -25,21 +25,21 @@ class VideoCreator:
         os.makedirs(self.video_dir, exist_ok=True)
 
         # Video settings
-        self.fps = 10
+        self.fps = 12  # Increased from 10 for 1.2x speed
         self.duration_seconds = 45  # Perfect for LinkedIn
         self.total_frames = self.fps * self.duration_seconds
 
-        # Agent progression checkpoints
+        # Agent progression checkpoints (updated to use 25-episode intervals)
         self.checkpoints = [
             {"episode": 0, "desc": "Episode 0: Random Actions", "model": None},
-            {"episode": 50, "desc": "Episode 50: Learning Control",
-                "model": "episode_50.weights.h5"},
-            {"episode": 200, "desc": "Episode 200: First Landings",
-                "model": "episode_200.weights.h5"},
-            {"episode": 500, "desc": "Episode 500: Improving Accuracy",
-                "model": "episode_500.weights.h5"},
-            {"episode": 750,
-                "desc": "Episode 750: Expert Performance (50% Success)", "model": "best_model.weights.h5"}
+            {"episode": 25, "desc": "Episode 25: Learning Control",
+                "model": "model_episode_25.weights.h5"},
+            {"episode": 100, "desc": "Episode 100: First Landings",
+                "model": "model_episode_100.weights.h5"},
+            {"episode": 250, "desc": "Episode 250: Improving Accuracy",
+                "model": "model_episode_250.weights.h5"},
+            {"episode": 500,
+                "desc": "Episode 500: Expert Performance", "model": "best_model.weights.h5"}
         ]
 
     def load_agent_at_checkpoint(self, checkpoint):
@@ -55,8 +55,15 @@ class VideoCreator:
         )
 
         if checkpoint["model"]:
-            model_path = os.path.join(
-                self.results_dir, "current_run", "models", checkpoint["model"])
+            # Try episode_saves directory first (for episode-specific models)
+            if checkpoint["model"].startswith("model_episode_"):
+                model_path = os.path.join(
+                    self.results_dir, "current_run", "episode_saves", checkpoint["model"])
+            else:
+                # Fall back to models directory (for best_model, final_model, etc.)
+                model_path = os.path.join(
+                    self.results_dir, "current_run", "models", checkpoint["model"])
+            
             if os.path.exists(model_path):
                 agent.load(model_path)
                 print(f"Loaded model: {model_path}")
@@ -128,23 +135,22 @@ class VideoCreator:
                 'outcome': outcome
             })
 
-        # Create video with side-by-side comparison
-        self._create_split_screen_video(episode_data)
+        # Create video with overlaid stats
+        self._create_overlay_video(episode_data)
 
-    def _create_split_screen_video(self, episode_data):
-        """Create professional split-screen video."""
+    def _create_overlay_video(self, episode_data):
+        """Create professional video with overlaid stats."""
 
         # Video settings
-        height, width = 400, 600  # Standard frame size
-        video_width = width * 2 + 40  # Two panels + spacing
-        video_height = height + 150   # Space for text and metrics
+        height, width = 600, 800  # Larger single frame
+        video_height = height + 100   # Space for title
 
         # Initialize video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_path = os.path.join(
             self.video_dir, 'moonlander_learning_progression.mp4')
         out = cv2.VideoWriter(video_path, fourcc, self.fps,
-                              (video_width, video_height))
+                              (width, video_height))
 
         # Calculate frames per episode (equal time for each)
         frames_per_episode = self.total_frames // len(episode_data)
@@ -154,8 +160,8 @@ class VideoCreator:
             rewards = ep_data['rewards']
             checkpoint = ep_data['checkpoint']
 
-            # Interpolate frames to match target duration
-            target_frame_count = frames_per_episode
+            # Apply 1.2x speed by reducing frame count
+            target_frame_count = int(frames_per_episode / 1.2)
             frame_indices = np.linspace(
                 0, len(frames)-1, target_frame_count, dtype=int)
 
@@ -169,21 +175,17 @@ class VideoCreator:
                 # Resize game frame
                 game_frame_resized = cv2.resize(game_frame, (width, height))
 
-                # Create composite frame
-                # Dark background
+                # Create composite frame with dark background
                 composite = np.ones(
-                    (video_height, video_width, 3), dtype=np.uint8) * 20
+                    (video_height, width, 3), dtype=np.uint8) * 20
 
                 # Add game frame
-                y_offset = 80
-                x_offset = 20
-                composite[y_offset:y_offset+height,
-                          x_offset:x_offset+width] = game_frame_resized
+                y_offset = 60
+                composite[y_offset:y_offset+height, 0:width] = game_frame_resized
 
-                # Add metrics panel
-                metrics_x = width + 40
-                self._add_metrics_panel(composite, checkpoint, current_reward, ep_data['outcome'],
-                                        metrics_x, y_offset, width, height)
+                # Add overlaid stats
+                self._add_overlay_stats(composite, checkpoint, current_reward, 
+                                      ep_data['outcome'], y_offset, width, height)
 
                 # Add title and progress
                 self._add_title_and_progress(
@@ -196,44 +198,47 @@ class VideoCreator:
         print(f"Video saved: {video_path}")
         return video_path
 
-    def _add_metrics_panel(self, composite, checkpoint, current_reward, outcome, x, y, width, height):
-        """Add metrics panel to the right side."""
-        # Create metrics background
-        cv2.rectangle(composite, (x, y), (x + width,
-                      y + height), (40, 40, 40), -1)
-        cv2.rectangle(composite, (x, y), (x + width,
-                      y + height), (100, 100, 100), 2)
-
-        # Add text
+    def _add_overlay_stats(self, composite, checkpoint, current_reward, outcome, y_offset, width, height):
+        """Add stats overlaid on the game video."""
         font = cv2.FONT_HERSHEY_SIMPLEX
-
+        
+        # Semi-transparent overlay background for stats (top-left corner)
+        overlay_height = 180
+        overlay_width = 320
+        overlay = composite.copy()
+        cv2.rectangle(overlay, (10, y_offset + 10), (10 + overlay_width, y_offset + 10 + overlay_height), 
+                     (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, composite, 0.3, 0, composite)
+        
         # Episode info
-        cv2.putText(composite, f"Episode {checkpoint['episode']}",
-                    (x + 20, y + 40), font, 0.8, (255, 255, 255), 2)
-
-        # Current reward
+        cv2.putText(composite, f"Episode {checkpoint['episode']}", 
+                   (20, y_offset + 40), font, 0.9, (255, 255, 255), 2)
+        
+        # Current reward with dynamic color
         color = (0, 255, 0) if current_reward > 0 else (0, 100, 255)
-        cv2.putText(composite, f"Score: {current_reward:.1f}",
-                    (x + 20, y + 80), font, 0.7, color, 2)
-
-        # Outcome
-        outcome_color = (0, 255, 0) if "SUCCESS" in outcome else (0, 0, 255)
-        cv2.putText(composite, f"Result: {outcome}",
-                    (x + 20, y + 120), font, 0.6, outcome_color, 2)
-
-        # Progress description
-        desc_lines = self._wrap_text(checkpoint['desc'], 25)
-        for i, line in enumerate(desc_lines):
-            cv2.putText(composite, line, (x + 20, y + 180 + i * 30),
-                        font, 0.5, (200, 200, 200), 1)
-
-        # Add success rate if available
-        if checkpoint['episode'] >= 50:
-            success_rates = {50: "5%", 200: "15%", 500: "35%", 750: "50%"}
+        cv2.putText(composite, f"Score: {current_reward:.1f}", 
+                   (20, y_offset + 75), font, 0.8, color, 2)
+        
+        # Episode description
+        desc_short = checkpoint['desc'].split(': ')[1] if ': ' in checkpoint['desc'] else checkpoint['desc']
+        cv2.putText(composite, desc_short, 
+                   (20, y_offset + 110), font, 0.6, (200, 200, 200), 2)
+        
+        # Success rate if available
+        if checkpoint['episode'] >= 25:
+            success_rates = {25: "2%", 100: "10%", 250: "25%", 500: "40%"}
             rate = success_rates.get(checkpoint['episode'], "")
             if rate:
-                cv2.putText(composite, f"Success Rate: {rate}",
-                            (x + 20, y + 280), font, 0.6, (0, 255, 255), 2)
+                cv2.putText(composite, f"Success Rate: {rate}", 
+                           (20, y_offset + 145), font, 0.7, (0, 255, 255), 2)
+        
+        # Outcome indicator (top-right corner)
+        outcome_color = (0, 255, 0) if "SUCCESS" in outcome else (0, 0, 255) if "CRASH" in outcome else (255, 255, 0)
+        cv2.putText(composite, outcome, (width - 150, y_offset + 40), font, 0.8, outcome_color, 2)
+
+    def _add_metrics_panel(self, composite, checkpoint, current_reward, outcome, x, y, width, height):
+        """Legacy method - keeping for compatibility."""
+        pass
 
     def _add_title_and_progress(self, composite, checkpoint, current_ep, total_eps):
         """Add title and progress bar."""
@@ -292,12 +297,12 @@ class VideoCreator:
         plt.style.use('dark_background')
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
 
-        # Mock data based on your training results
-        episodes = np.array([0, 50, 100, 200, 300, 500, 750])
+        # Mock data based on your training results (updated for 25-episode intervals)
+        episodes = np.array([0, 25, 50, 100, 150, 250, 500])
         success_rates = np.array(
-            [0, 2, 8, 15, 25, 35, 50])  # Based on your logs
+            [0, 2, 5, 10, 18, 25, 40])  # Based on your logs
         # Based on your progression
-        avg_rewards = np.array([-300, -250, -150, -50, 50, 150, 280])
+        avg_rewards = np.array([-300, -280, -200, -100, 0, 100, 250])
 
         # Success rate plot
         ax1.plot(episodes, success_rates, 'o-',
