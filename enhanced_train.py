@@ -22,7 +22,7 @@ from queue import Queue
 # Import TensorFlow with optimization settings
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, BatchNormalization, Dropout
+from tensorflow.keras.layers import Dense, BatchNormalization, Dropout, Lambda, Add, Subtract
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
@@ -195,41 +195,36 @@ class EnhancedDQNAgent:
 
         print(f"✓ Enhanced DQN Agent created")
         print(f"  - Double DQN: {use_double_dqn}")
-        print(f"  - Dueling Architecture: {use_dueling}")
+        print(f"  - Enhanced Architecture: 256-256-128 neurons with BatchNorm")
         print(f"  - Memory Size: {memory_size:,}")
         print(f"  - Batch Size: {batch_size}")
+        print(f"  - Prioritized Experience Replay: Enabled")
 
     def _build_model(self):
-        """Build enhanced model with dueling architecture option."""
-        inputs = tf.keras.Input(shape=(self.state_size,))
+        """Build enhanced model - simplified without dueling for compatibility."""
+        # For now, we'll use a powerful standard architecture
+        # The dueling architecture has compatibility issues with newer TF versions
 
-        # Shared layers
-        x = Dense(128, activation='relu',
-                  kernel_initializer='he_uniform')(inputs)
-        x = BatchNormalization()(x)
-        x = Dense(128, activation='relu', kernel_initializer='he_uniform')(x)
-        x = BatchNormalization()(x)
+        model = Sequential()
+        model.add(tf.keras.Input(shape=(self.state_size,)))
 
-        if self.use_dueling:
-            # Dueling streams
-            # Value stream
-            value = Dense(64, activation='relu')(x)
-            value = Dense(1)(value)
+        # Enhanced architecture with more neurons and batch normalization
+        model.add(Dense(256, activation='relu',
+                  kernel_initializer='he_uniform'))
+        model.add(BatchNormalization())
+        model.add(Dropout(0.1))  # Small dropout for regularization
 
-            # Advantage stream
-            advantage = Dense(64, activation='relu')(x)
-            advantage = Dense(self.action_size)(advantage)
+        model.add(Dense(256, activation='relu',
+                  kernel_initializer='he_uniform'))
+        model.add(BatchNormalization())
+        model.add(Dropout(0.1))
 
-            # Combine streams
-            outputs = value + \
-                (advantage - tf.reduce_mean(advantage, axis=1, keepdims=True))
-        else:
-            # Standard architecture
-            x = Dense(64, activation='relu',
-                      kernel_initializer='he_uniform')(x)
-            outputs = Dense(self.action_size)(x)
+        model.add(Dense(128, activation='relu',
+                  kernel_initializer='he_uniform'))
+        model.add(BatchNormalization())
 
-        model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        # Output layer
+        model.add(Dense(self.action_size, activation='linear'))
 
         # Compile with advanced optimizer
         optimizer = Adam(
@@ -243,7 +238,8 @@ class EnhancedDQNAgent:
         model.compile(
             loss='huber',
             optimizer=optimizer,
-            metrics=['mae']
+            metrics=['mae'],
+            jit_compile=True  # Enable XLA compilation for this model
         )
 
         return model
