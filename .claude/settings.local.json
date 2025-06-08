@@ -9,7 +9,13 @@
       "Bash(cp:*)",
       "Bash(python:*)",
       "Bash(chmod:*)",
-      "Bash(pip3 list:*)"
+      "Bash(pip3 list:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(.venv/Scripts/python.exe train_unified.py:*)",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe train_unified.py --episodes 2 --mixed-precision --batch-size 16 --memory-size 1000)"
     ],
     "deny": []
   }

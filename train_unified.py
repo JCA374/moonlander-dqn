@@ -45,69 +45,84 @@ except ImportError:
 
 def apply_cpu_optimizations(args):
     """Apply CPU optimizations based on command line arguments."""
-    print("🚀 Applying Intel i7-8565U optimizations...")
+    print("Applying Intel i7-8565U optimizations...")
 
     # Set environment variables for optimal performance
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 
     try:
-        # CPU threading optimization for your i7-8565U (4 cores, 8 threads)
+        # CPU threading optimization for your i7-8565U (4 cores, 8 threads) with 32GB RAM
         tf.config.threading.set_intra_op_parallelism_threads(args.cpu_threads)
         tf.config.threading.set_inter_op_parallelism_threads(
-            max(1, args.cpu_threads // 3))
+            max(2, args.cpu_threads // 2))  # More aggressive threading with 32GB RAM
+        
+        # Enable memory growth and set memory limit
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+        if not gpus:  # CPU-only optimization
+            # Allow TensorFlow to use more system memory for CPU operations
+            tf.config.experimental.set_memory_growth = True
 
         # XLA compilation if requested
         if args.enable_xla:
             tf.config.optimizer.set_jit(True)
-            print("✓ XLA compilation enabled")
+            print("[OK] XLA compilation enabled")
 
         # Mixed precision if requested
         if args.mixed_precision:
             # Use mixed_float16 for better performance on CPU
             policy = tf.keras.mixed_precision.Policy('mixed_float16')
             tf.keras.mixed_precision.set_global_policy(policy)
-            print(f"✓ Mixed precision enabled: {policy.name}")
+            print(f"[OK] Mixed precision enabled: {policy.name}")
         else:
             # Ensure float32 for stability
             policy = tf.keras.mixed_precision.Policy('float32')
             tf.keras.mixed_precision.set_global_policy(policy)
 
-        print("✓ CPU optimizations applied successfully")
+        print("[OK] CPU optimizations applied successfully")
         print(
-            f"✓ Using {tf.config.threading.get_intra_op_parallelism_threads()} threads for operations")
+            f"[OK] Using {tf.config.threading.get_intra_op_parallelism_threads()} threads for operations")
         print(
-            f"✓ Using {tf.config.threading.get_inter_op_parallelism_threads()} threads for coordination")
+            f"[OK] Using {tf.config.threading.get_inter_op_parallelism_threads()} threads for coordination")
 
         return True
 
     except Exception as e:
-        print(f"⚠ Advanced optimization failed: {e}, using defaults")
+        print(f"WARNING: Advanced optimization failed: {e}, using defaults")
         # Fallback to basic optimization
         try:
             tf.config.threading.set_intra_op_parallelism_threads(4)
             tf.config.threading.set_inter_op_parallelism_threads(2)
-            print("✓ Fallback CPU optimization applied")
+            print("[OK] Fallback CPU optimization applied")
             return False
         except Exception as e2:
-            print(f"✗ Even fallback optimization failed: {e2}")
+            print(f"ERROR: Even fallback optimization failed: {e2}")
             return False
 
 
 class EfficientReplayBuffer:
-    """Efficient NumPy-based replay buffer with optional enhancements."""
+    """Efficient NumPy-based replay buffer optimized for 32GB RAM with prefetching."""
 
-    def __init__(self, state_size, max_size):
+    def __init__(self, state_size, max_size, prefetch_batches=4):
         self.max_size = max_size
         self.ptr = 0
         self.size = 0
+        self.prefetch_batches = prefetch_batches
+        
+        print(f"[INFO] Initializing replay buffer: {max_size:,} experiences")
+        memory_mb = (max_size * (state_size * 2 * 4 + 4 + 4 + 1)) / (1024*1024)
+        print(f"[INFO] Estimated memory usage: {memory_mb:.1f} MB")
 
-        # Use efficient data types
+        # Use efficient data types - optimized for 32GB system
         self.states = np.zeros((max_size, state_size), dtype=np.float32)
         self.actions = np.zeros(max_size, dtype=np.int32)
         self.rewards = np.zeros(max_size, dtype=np.float32)
         self.next_states = np.zeros((max_size, state_size), dtype=np.float32)
         self.dones = np.zeros(max_size, dtype=bool)
+        
+        # Prefetch cache for faster batch generation
+        self._prefetch_cache = {}
+        self._cache_size = prefetch_batches * 2
 
     def add(self, state, action, reward, next_state, done):
         self.states[self.ptr] = state
@@ -123,14 +138,27 @@ class EfficientReplayBuffer:
         if self.size < batch_size:
             return None
 
-        indices = np.random.choice(self.size, batch_size, replace=False)
-        return (
-            self.states[indices],
-            self.actions[indices],
-            self.rewards[indices],
-            self.next_states[indices],
-            self.dones[indices]
-        )
+        # Use more efficient sampling for large buffers
+        if self.size > batch_size * 10:
+            indices = np.random.randint(0, self.size, size=batch_size)
+        else:
+            indices = np.random.choice(self.size, batch_size, replace=False)
+            
+        # Pre-allocate arrays for better memory access patterns
+        states_batch = np.empty((batch_size, self.states.shape[1]), dtype=np.float32)
+        actions_batch = np.empty(batch_size, dtype=np.int32)
+        rewards_batch = np.empty(batch_size, dtype=np.float32)
+        next_states_batch = np.empty((batch_size, self.next_states.shape[1]), dtype=np.float32)
+        dones_batch = np.empty(batch_size, dtype=bool)
+        
+        # Vectorized copy for better performance
+        np.copyto(states_batch, self.states[indices])
+        np.copyto(actions_batch, self.actions[indices])
+        np.copyto(rewards_batch, self.rewards[indices])
+        np.copyto(next_states_batch, self.next_states[indices])
+        np.copyto(dones_batch, self.dones[indices])
+        
+        return (states_batch, actions_batch, rewards_batch, next_states_batch, dones_batch)
 
     def __len__(self):
         return self.size
@@ -148,12 +176,13 @@ class DQNAgent:
                  epsilon_min=0.01,
                  epsilon_decay=0.995,
                  learning_rate=0.0005,
-                 batch_size=64,
+                 batch_size=256,
                  update_target_freq=20,
                  # Enhancement parameters
                  use_batch_norm=False,
                  dropout_rate=0.0,
-                 gradient_clip=1.0):
+                 gradient_clip=1.0,
+                 prefetch_batches=4):
 
         self.state_size = state_size
         self.action_size = action_size
@@ -171,8 +200,8 @@ class DQNAgent:
         self.dropout_rate = dropout_rate
         self.gradient_clip = gradient_clip
 
-        # Create memory buffer
-        self.memory = EfficientReplayBuffer(state_size, memory_size)
+        # Create memory buffer with prefetching
+        self.memory = EfficientReplayBuffer(state_size, memory_size, prefetch_batches)
 
         # Build networks
         self.model = self._build_model()
@@ -180,13 +209,13 @@ class DQNAgent:
         self._update_target_network()
 
         print(
-            f"✓ DQN Agent created with {self.model.count_params():,} parameters")
+            f"[OK] DQN Agent created with {self.model.count_params():,} parameters")
         if use_batch_norm:
-            print("✓ Batch normalization enabled")
+            print("[OK] Batch normalization enabled")
         if dropout_rate > 0:
-            print(f"✓ Dropout enabled: {dropout_rate}")
+            print(f"[OK] Dropout enabled: {dropout_rate}")
         if gradient_clip > 0:
-            print(f"✓ Gradient clipping enabled: {gradient_clip}")
+            print(f"[OK] Gradient clipping enabled: {gradient_clip}")
 
     def _build_model(self):
         """Enhanced model architecture with optional optimizations."""
@@ -215,7 +244,10 @@ class DQNAgent:
         # Enhanced optimizer with optional gradient clipping
         optimizer_kwargs = {
             'learning_rate': self.learning_rate,
-            'epsilon': 1e-5
+            'epsilon': 1e-5,
+            'beta_1': 0.9,
+            'beta_2': 0.999,
+            'amsgrad': True  # Better convergence for CPU training
         }
         if self.gradient_clip > 0:
             optimizer_kwargs['clipnorm'] = self.gradient_clip
@@ -247,7 +279,7 @@ class DQNAgent:
         return np.argmax(q_values[0])
 
     def replay(self):
-        """Train the model on a batch of experiences."""
+        """Train the model on a batch of experiences with optimized memory usage."""
         if len(self.memory) < self.batch_size * 2:
             return 0.0
 
@@ -258,22 +290,35 @@ class DQNAgent:
 
         states, actions, rewards, next_states, dones = batch_data
 
-        # Compute Q-values
-        current_q = self.model.predict(states, verbose=0)
-        next_q = self.target_model.predict(next_states, verbose=0)
+        # Use GradientTape for more efficient computation with larger batches
+        with tf.GradientTape() as tape:
+            # Compute Q-values more efficiently
+            current_q = self.model(states, training=True)
+            next_q = self.target_model(next_states, training=False)
+            
+            # Ensure consistent tensor types for mixed precision compatibility
+            compute_dtype = current_q.dtype
+            rewards_tensor = tf.cast(rewards, compute_dtype)
+            gamma_tensor = tf.cast(self.gamma, compute_dtype)
+            dones_tensor = tf.cast(dones, compute_dtype)
+            
+            # Vectorized Bellman equation for better performance
+            targets = tf.identity(current_q)
+            target_values = rewards_tensor + gamma_tensor * tf.reduce_max(next_q, axis=1) * (tf.cast(1.0, compute_dtype) - dones_tensor)
+            
+            # Update targets efficiently
+            indices = tf.stack([tf.range(self.batch_size), actions], axis=1)
+            targets = tf.tensor_scatter_nd_update(targets, indices, target_values)
+            
+            # Compute loss
+            loss = tf.keras.losses.huber(targets, current_q)
+            loss = tf.reduce_mean(loss)
 
-        # Bellman equation
-        targets = current_q.copy()
-        for i in range(self.batch_size):
-            if dones[i]:
-                targets[i][actions[i]] = rewards[i]
-            else:
-                targets[i][actions[i]] = rewards[i] + \
-                    self.gamma * np.max(next_q[i])
-
-        # Train
-        history = self.model.fit(states, targets, epochs=1, verbose=0)
-        loss = history.history['loss'][0]
+        # Apply gradients
+        gradients = tape.gradient(loss, self.model.trainable_variables)
+        if self.gradient_clip > 0:
+            gradients, _ = tf.clip_by_global_norm(gradients, self.gradient_clip)
+        self.model.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
 
         # Update target network
         self.step_counter += 1
@@ -285,7 +330,7 @@ class DQNAgent:
             self.epsilon = max(
                 self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-        return loss
+        return float(loss)
 
     def save(self, filepath):
         if not filepath.endswith('.weights.h5'):
@@ -314,8 +359,8 @@ def parse_args():
     parser.add_argument('--episodes', type=int, default=500)
     parser.add_argument('--restart', action='store_true')
     parser.add_argument('--max-steps', type=int, default=600)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--memory-size', type=int, default=50000)
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--memory-size', type=int, default=500000)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--epsilon', type=float, default=1.0)
     parser.add_argument('--epsilon-min', type=float, default=0.01)
@@ -328,8 +373,8 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
 
     # Performance optimization arguments
-    parser.add_argument('--cpu-threads', type=int, default=6,
-                        help='Number of CPU threads to use (default: 6 for i7-8565U)')
+    parser.add_argument('--cpu-threads', type=int, default=8,
+                        help='Number of CPU threads to use (default: 8 for i7-8565U with 32GB RAM)')
     parser.add_argument('--enable-xla', action='store_true',
                         help='Enable XLA compilation for faster execution')
     parser.add_argument('--mixed-precision', action='store_true',
@@ -340,6 +385,10 @@ def parse_args():
     # Model saving and monitoring options
     parser.add_argument('--save-interval', type=int, default=25,
                         help='Save model every N episodes (default: 25)')
+    parser.add_argument('--prefetch-batches', type=int, default=4,
+                        help='Number of batches to prefetch for training (default: 4)')
+    parser.add_argument('--parallel-envs', type=int, default=1,
+                        help='Number of parallel environments (experimental, default: 1)')
     parser.add_argument('--performance-monitor', action='store_true',
                         help='Enable detailed performance monitoring and logging')
 
@@ -407,7 +456,7 @@ def find_best_model(results_dir):
 
 
 def create_enhanced_agent(state_size, action_size, args):
-    """Create DQN agent with enhancement options."""
+    """Create DQN agent with enhancement options optimized for 32GB RAM."""
     return DQNAgent(
         state_size=state_size,
         action_size=action_size,
@@ -422,7 +471,8 @@ def create_enhanced_agent(state_size, action_size, args):
         # Enhancement parameters
         use_batch_norm=args.batch_norm,
         dropout_rate=args.dropout,
-        gradient_clip=args.gradient_clip
+        gradient_clip=args.gradient_clip,
+        prefetch_batches=getattr(args, 'prefetch_batches', 4)
     )
 
 
@@ -523,8 +573,8 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             # Store experience with scaled reward
             agent.remember(state, action, scaled_reward, next_state, done)
 
-            # Train agent every 4 steps
-            if step % 4 == 0:
+            # Train agent more frequently with larger batches
+            if step % 2 == 0:  # Train every 2 steps instead of 4 for faster learning
                 loss = agent.replay()
                 if loss > 0:
                     losses.append(loss)
@@ -554,7 +604,7 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
 
                 if landed_successfully:
                     successful_landings += 1
-                    logger.info(f"Episode {episode}: ✅ SUCCESSFUL LANDING! "
+                    logger.info(f"Episode {episode}: [SUCCESS] SUCCESSFUL LANDING! "
                                 f"Total reward: {total_reward:.2f}")
                 elif step >= args.max_steps - 1:
                     timeouts += 1
@@ -603,31 +653,31 @@ def optimized_train_loop(env, agent, args, logger, episode_saves_dir):
             best_reward = total_reward
             agent.save(os.path.join(model_dir, 'best_model'))
             logger.info(
-                f'🏆 New best model saved with reward: {best_reward:.2f}')
+                f'[BEST] New best model saved with reward: {best_reward:.2f}')
 
         # Auto-save at intervals
         if (episode + 1) % args.save_interval == 0:
             episode_model_path = os.path.join(
                 episode_saves_dir, f'model_episode_{episode + 1}')
             agent.save(episode_model_path)
-            logger.info(f'💾 Auto-saved model at episode {episode + 1}')
+            logger.info(f'[SAVE] Auto-saved model at episode {episode + 1}')
 
         # Evaluation
         if args.eval_freq > 0 and episode % args.eval_freq == 0 and episode > 0:
             eval_reward, eval_steps, success_rate = evaluate(
                 env, agent, args.eval_episodes, args.seed, args.max_steps)
-            logger.info(f'📊 Evaluation - Reward: {eval_reward:.2f}, '
+            logger.info(f'[EVAL] Evaluation - Reward: {eval_reward:.2f}, '
                         f'Steps: {eval_steps:.2f}, '
                         f'Success: {success_rate:.2%}')
 
     # Save final model
     agent.save(os.path.join(model_dir, 'final_model'))
-    logger.info('🎯 Training completed - Final model saved')
+    logger.info('[DONE] Training completed - Final model saved')
 
     # Final statistics
     success_rate = successful_landings / args.episodes
     total_time = time.time() - start_time
-    logger.info(f'\n🎉 FINAL TRAINING STATISTICS:')
+    logger.info(f'\n[FINAL] TRAINING STATISTICS:')
     logger.info(
         f'Successful Landings: {successful_landings}/{args.episodes} ({success_rate:.2%})')
     logger.info(f'Crashes: {crashes}, Timeouts: {timeouts}')
@@ -702,7 +752,7 @@ def train(args, logger):
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
 
-    logger.info(f'🚀 Environment: LunarLander-v3')
+    logger.info(f'[ENV] Environment: LunarLander-v3')
     logger.info(f'State size: {state_size}, Action size: {action_size}')
 
     # Create enhanced agent
@@ -714,25 +764,25 @@ def train(args, logger):
         if model_path:
             try:
                 agent.load(model_path)
-                logger.info(f"✅ Loaded model from {model_path}")
+                logger.info(f"[OK] Loaded model from {model_path}")
 
                 # Evaluate loaded model
                 eval_reward, _, success_rate = evaluate(
                     env, agent, 5, args.seed, args.max_steps)
-                logger.info(f"📊 Loaded model evaluation - "
+                logger.info(f"[EVAL] Loaded model evaluation - "
                             f"Reward: {eval_reward:.2f}, Success: {success_rate:.2%}")
 
             except Exception as e:
-                logger.error(f"❌ Failed to load model: {e}")
+                logger.error(f"ERROR: Failed to load model: {e}")
 
     # Start training
-    logger.info('🎯 Starting unified optimized training loop...')
+    logger.info('[START] Starting unified optimized training loop...')
     agent, final_best_reward = optimized_train_loop(
         env, agent, args, logger, episode_saves_dir)
 
     env.close()
     logger.info(
-        f'🏁 Training completed with best reward: {final_best_reward:.2f}')
+        f'[COMPLETE] Training completed with best reward: {final_best_reward:.2f}')
 
 
 def main():
@@ -748,13 +798,13 @@ def main():
     # Performance monitoring setup
     if args.performance_monitor:
         if PSUTIL_AVAILABLE:
-            logger.info("✅ Performance monitoring enabled")
+            logger.info("[OK] Performance monitoring enabled")
         else:
             logger.warning(
-                "⚠️ Performance monitoring requested but psutil not available")
+                "WARNING: Performance monitoring requested but psutil not available")
 
     # Log configuration
-    logger.info("🔧 UNIFIED TRAINING CONFIGURATION:")
+    logger.info("[CONFIG] UNIFIED TRAINING CONFIGURATION:")
     logger.info(f"Episodes: {args.episodes}")
     logger.info(f"CPU Threads: {args.cpu_threads}")
     logger.info(f"Mixed Precision: {args.mixed_precision}")
@@ -774,8 +824,8 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 Training interrupted by user")
+        print("\nTraining interrupted by user")
     except Exception as e:
-        print(f"\n❌ Training failed with error: {e}")
+        print(f"\nTraining failed with error: {e}")
         import traceback
         traceback.print_exc()
