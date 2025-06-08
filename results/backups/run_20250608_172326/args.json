@@ -1,7 +1,7 @@
 {
     "mode": "train",
     "output_dir": "results",
-    "model_path": "results/backups\\run_20250608_131919\\models\\best_model.weights.h5",
+    "model_path": "results/current_run\\models\\best_model.weights.h5",
     "episodes": 1000,
     "restart": false,
     "max_steps": 600,

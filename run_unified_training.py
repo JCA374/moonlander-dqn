@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Python script to run unified training on Windows
-Works cross-platform without needing bash or batch files
+Script to continue training from your best previous model
+instead of starting from scratch.
 """
 import os
 import sys
@@ -10,95 +10,190 @@ import shutil
 from datetime import datetime
 
 
-def create_backup():
-    """Create backup of current results if they exist."""
+def find_best_model():
+    """Find the best model from all previous runs."""
+    print("\n🔍 Searching for best models...")
+
+    models = []
+
+    # Search in all locations
+    search_dirs = ["results/current_run", "results/backups"]
+
+    for base_dir in search_dirs:
+        if not os.path.exists(base_dir):
+            continue
+
+        for root, dirs, files in os.walk(base_dir):
+            for file in files:
+                if file == "best_model.weights.h5":
+                    path = os.path.join(root, file)
+                    size = os.path.getsize(path) / (1024 * 1024)  # MB
+                    mtime = os.path.getmtime(path)
+
+                    # Check parent directory for run info
+                    run_dir = os.path.dirname(os.path.dirname(path))
+                    args_file = os.path.join(run_dir, "args.json")
+
+                    models.append({
+                        'path': path,
+                        'size_mb': size,
+                        'mtime': mtime,
+                        'run_dir': run_dir,
+                        'has_args': os.path.exists(args_file)
+                    })
+
+    if not models:
+        return None
+
+    # Sort by modification time (most recent first)
+    models.sort(key=lambda x: x['mtime'], reverse=True)
+
+    print(f"\nFound {len(models)} models:")
+    for i, model in enumerate(models[:5]):
+        print(f"\n{i+1}. {model['path']}")
+        print(f"   Size: {model['size_mb']:.2f} MB")
+        print(
+            f"   Modified: {datetime.fromtimestamp(model['mtime']).strftime('%Y-%m-%d %H:%M')}")
+
+    # Let user choose
+    if len(models) > 1:
+        choice = input(
+            f"\nSelect model [1-{min(5, len(models))}] or press Enter for most recent: ")
+        if choice.isdigit() and 1 <= int(choice) <= min(5, len(models)):
+            return models[int(choice)-1]['path']
+
+    return models[0]['path']
+
+
+def run_continued_training():
+    """Run training continuing from best model."""
+    print("="*60)
+    print("🚀 CONTINUE TRAINING FROM BEST MODEL")
+    print("="*60)
+
+    # Find best model
+    best_model_path = find_best_model()
+
+    if not best_model_path:
+        print("\n❌ No previous models found!")
+        print("You'll need to train from scratch first.")
+        return
+
+    print(f"\n✅ Selected model: {best_model_path}")
+
+    # Backup current run if exists
     if os.path.exists("results/current_run"):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = f"results/backups/run_{timestamp}"
-
-        print(f"📦 Creating backup of current results...")
+        print(f"\n📦 Backing up current run to: {backup_dir}")
         os.makedirs("results/backups", exist_ok=True)
         shutil.move("results/current_run", backup_dir)
-        print(f"✅ Backup created: {backup_dir}")
-        return True
-    return False
 
-
-def run_training():
-    """Run the unified training with optimal settings."""
-    print("="*60)
-    print("🚀 Starting Unified MoonLander Training")
-    print("System: Intel i7-8565U (4 cores, 8 threads), 32GB RAM")
-    print("="*60)
-
-    # Create backup if needed
-    create_backup()
-
-    # Training arguments - optimized for 32GB RAM and i7-8565U
+    # Conservative settings for continued training
     args = [
-        sys.executable,  # Use current Python interpreter
+        sys.executable,
         "train_unified.py",
-        "--episodes", "3000",
-        "--cpu-threads", "8",
-        "--batch-size", "256",          # Increased for 32GB RAM
-        "--memory-size", "500000",      # 10x larger buffer for 32GB RAM
-        "--learning-rate", "0.0003",
-        "--epsilon-decay", "0.997",
-        "--update-target-freq", "15",
-        "--save-interval", "50",
-        "--batch-norm",
-        "--gradient-clip", "1.0",
-        "--dropout", "0.1",
-        "--performance-monitor",
-        "--eval-freq", "50",
+        "--model-path", best_model_path,
+        "--episodes", "1000",  # Moderate episode count
+        "--batch-size", "128",  # Conservative batch size
+        "--memory-size", "200000",
+        "--learning-rate", "0.0001",  # Lower learning rate for fine-tuning
+        "--epsilon", "0.1",  # Start with low exploration since model is trained
+        "--epsilon-min", "0.01",
+        "--epsilon-decay", "0.995",
+        "--update-target-freq", "50",  # Less frequent updates for stability
+        "--save-interval", "25",
+        "--eval-freq", "25",
         "--eval-episodes", "5",
-        "--prefetch-batches", "6",      # Prefetch more batches with more RAM
-        "--mixed-precision"             # Enable for better performance
+        "--cpu-threads", "6",
+        "--performance-monitor",
+        # Start without aggressive optimizations
+        # Can add these if training is stable:
+        # "--batch-norm",
+        # "--mixed-precision",
+        # "--enable-xla",
     ]
 
-    print("\n🎯 Starting training with unified settings...")
-    print("Command:", " ".join(args[1:]))
+    print("\n🎯 Training settings:")
+    print("- Starting from pre-trained model")
+    print("- Lower learning rate (0.0001) for fine-tuning")
+    print("- Low epsilon (0.1) since model already knows basics")
+    print("- Conservative batch size (128)")
+    print("- 1000 additional episodes")
     print("-"*60)
 
+    response = input("\nProceed with continued training? (y/n): ")
+    if response.lower() != 'y':
+        print("Cancelled.")
+        return
+
     try:
-        # Run the training
         result = subprocess.run(args, check=True)
+        print("\n✅ Continued training completed successfully!")
 
-        print("\n" + "="*60)
-        print("✅ Training completed successfully!")
-        print("="*60)
-
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ Training failed with error code: {e.returncode}")
-        sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\n🛑 Training interrupted by user")
-        sys.exit(0)
+        print("\n🛑 Training interrupted by user")
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
-        sys.exit(1)
+        print(f"\n❌ Training failed: {e}")
+
+
+def run_test_play():
+    """Test play the best model to check its performance."""
+    print("\n🎮 TESTING BEST MODEL")
+    print("="*60)
+
+    best_model_path = find_best_model()
+
+    if not best_model_path:
+        print("No model found to test.")
+        return
+
+    args = [
+        sys.executable,
+        "enhanced_play_best_model.py",
+        "--model-path", best_model_path,
+        "--episodes", "5",
+        "--detailed"
+    ]
+
+    print(f"\nTesting model: {best_model_path}")
+    print("Running 5 test episodes...")
+
+    try:
+        subprocess.run(args, check=True)
+    except Exception as e:
+        print(f"Test failed: {e}")
 
 
 def main():
-    """Main entry point."""
-    # Check if train_unified.py exists
-    if not os.path.exists("train_unified.py"):
-        print("❌ Error: train_unified.py not found!")
-        print("Please make sure you've saved the unified training script.")
-        sys.exit(1)
+    """Main menu for continued training."""
+    print("""
+    🚀 MOONLANDER CONTINUED TRAINING
+    ================================
+    """)
 
-    # Check if we're in a virtual environment
-    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-        print("✅ Virtual environment detected")
-    else:
-        print("⚠️  Warning: Not running in a virtual environment")
-        response = input("Continue anyway? (y/n): ")
-        if response.lower() != 'y':
-            print("Exiting...")
-            sys.exit(0)
+    while True:
+        print("\nOptions:")
+        print("1. Continue training from best model")
+        print("2. Test play best model")
+        print("3. Run diagnostic (check diagnose_training.py)")
+        print("4. Exit")
 
-    # Run the training
-    run_training()
+        choice = input("\nSelect option [1-4]: ")
+
+        if choice == '1':
+            run_continued_training()
+        elif choice == '2':
+            run_test_play()
+        elif choice == '3':
+            if os.path.exists("diagnose_training.py"):
+                subprocess.run([sys.executable, "diagnose_training.py"])
+            else:
+                print("Run the diagnostic script first!")
+        elif choice == '4':
+            break
+        else:
+            print("Invalid choice.")
 
 
 if __name__ == "__main__":
