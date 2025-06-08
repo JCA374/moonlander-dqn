@@ -2,8 +2,8 @@
     "mode": "train",
     "output_dir": "results",
     "model_path": null,
-    "episodes": 100,
-    "restart": false,
+    "episodes": 2000,
+    "restart": true,
     "max_steps": 600,
     "batch_size": 64,
     "memory_size": 50000,
@@ -19,10 +19,10 @@
     "seed": 42,
     "cpu_threads": 6,
     "enable_xla": false,
-    "mixed_precision": false,
+    "mixed_precision": true,
     "batch_norm": false,
     "save_interval": 25,
-    "performance_monitor": false,
+    "performance_monitor": true,
     "gradient_clip": 1.0,
     "dropout": 0.0
 }
